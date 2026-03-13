@@ -115,14 +115,6 @@ Compare the two independent FixedTransit classification methods to decide which 
 ft_comparison = gdf_nodes_classified[["N", "FixedTransit_byFT", "FixedTransit_byN"]].copy()
 ft_comparison["agree"] = ft_comparison["FixedTransit_byFT"] == ft_comparison["FixedTransit_byN"]
 
-print(f"Total nodes:          {len(ft_comparison):,}")
-print(f"FixedTransit_byFT:    {ft_comparison['FixedTransit_byFT'].sum():,}")
-print(f"FixedTransit_byN:     {ft_comparison['FixedTransit_byN'].sum():,}")
-print(f"Agree:                {ft_comparison['agree'].sum():,}")
-print(f"Disagree:             {(~ft_comparison['agree']).sum():,}")
-```
-
-```{python}
 # Inspect disagreeing rows if any exist
 ft_comparison[~ft_comparison["agree"]]
 ```
