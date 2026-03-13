@@ -1,0 +1,119 @@
+---
+title: Data Preparation
+subtitle: including download or any preprocessing
+description: A short description
+author:
+ - name: Pukar Bhandari
+   email: pukar.bhandari@wfrc.utah.gov
+   affiliation:
+     - name: Wasatch Front Regional Council
+       url: "https://wfrc.utah.gov/"
+date: "2026-03-13"
+---
+
+##  Setup Environment
+
+### Import Libraries
+
+```{python}
+import sys
+from pathlib import Path
+
+import pandas as pd
+import geopandas as gpd
+
+from dotenv import load_dotenv
+import os
+
+from arcgis.gis import GIS
+
+# Add project root to path so _src can be imported
+sys.path.insert(0, str(Path.cwd()))
+from _src.arcgis_utils import fetch_feature_layer
+```
+
+### Filepath Configuration
+
+```{python}
+config_filepath = {
+    "out_centerlines": "_data/raw/UtahRoads.gpkg",
+    "out_network_links": "_data/raw/WFv1000_MasterNet - Link.gpkg",
+    "out_network_nodes": "_data/raw/WFv1000_MasterNet - Node.gpkg",
+}
+```
+
+### ArcGIS Connections
+
+```{python}
+# Anonymous connection for public layers
+gis_anon = GIS()
+```
+
+```{python}
+#| eval: false
+#| echo: false
+
+# Load project-level .env file
+load_dotenv()
+
+# Authenticated connection for private layers
+gis_auth = GIS(
+    url="https://wfrc.maps.arcgis.com",
+    username=os.getenv("ARCGIS_USERNAME"),
+    password=os.getenv("ARCGIS_PASSWORD"),
+)
+print(f"Logged in as: {gis_auth.properties.user.username}")
+```
+
+## Download and Store Data
+
+### Roadway Centerlines
+
+```{python}
+out_path = Path(config_filepath["out_centerlines"])
+
+if not out_path.exists():
+    gdf_centerlines = fetch_feature_layer(
+        service_url="https://services1.arcgis.com/99lidPhWCzftIe9K/ArcGIS/rest/services/UtahRoads/FeatureServer/0",
+        gis=gis_anon,
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    gdf_centerlines.to_file(out_path, driver="GPKG")
+    print(f"Saved to: {out_path}")
+else:
+    print(f"File already exists, skipping download: {out_path}")
+```
+
+### Network Links
+
+```{python}
+out_path = Path(config_filepath["out_network_links"])
+
+if not out_path.exists():
+    gdf_links = fetch_feature_layer(
+        service_url="https://services1.arcgis.com/taguadKoI1XFwivx/arcgis/rest/services/WFv1000_MasterNet_20250821___Link/FeatureServer/0",
+        gis=gis_anon,
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    gdf_links.to_file(out_path, driver="GPKG")
+    print(f"Saved to: {out_path}")
+else:
+    print(f"File already exists, skipping download: {out_path}")
+```
+
+### Network Nodes
+
+```{python}
+out_path = Path(config_filepath["out_network_nodes"])
+
+if not out_path.exists():
+    gdf_nodes = fetch_feature_layer(
+        service_url="https://services1.arcgis.com/taguadKoI1XFwivx/arcgis/rest/services/WFv1000_MasterNet_20250821___Node/FeatureServer/0",
+        gis=gis_anon,
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    gdf_nodes.to_file(out_path, driver="GPKG")
+    print(f"Saved to: {out_path}")
+else:
+    print(f"File already exists, skipping download: {out_path}")
+```

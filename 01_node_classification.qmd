@@ -1,0 +1,77 @@
+---
+title: Node Classification
+subtitle: classifying network nodes by type and connectivity
+description: A short description
+author:
+ - name: Pukar Bhandari
+   email: pukar.bhandari@wfrc.utah.gov
+   affiliation:
+     - name: Wasatch Front Regional Council
+       url: "https://wfrc.utah.gov/"
+date: "2026-03-13"
+---
+
+## Setup Environment
+
+### Import Libraries
+
+```{python}
+from pathlib import Path
+
+import pandas as pd
+import geopandas as gpd
+```
+
+### Filepath Configuration
+
+```{python}
+config_filepath = {
+    "in_centerlines": "_data/raw/UtahRoads.gpkg",
+    "in_network_links": "_data/raw/WFv1000_MasterNet - Link.gpkg",
+    "in_network_nodes": "_data/raw/WFv1000_MasterNet - Node.gpkg",
+}
+```
+
+## Load Data
+
+### Roadway Centerlines
+
+```{python}
+gdf_centerlines = gpd.read_file(config_filepath["in_centerlines"])
+
+print(f"Loaded {len(gdf_centerlines):,} features | CRS: {gdf_centerlines.crs}")
+```
+
+```{python}
+# | eval: false
+
+gdf_centerlines.head(1000).explore()
+```
+
+### Network Links
+
+```{python}
+gdf_links = gpd.read_file(config_filepath["in_network_links"])
+
+print(f"Loaded {len(gdf_links):,} features | CRS: {gdf_links.crs}")
+```
+
+```{python}
+#| eval: false
+
+gdf_links.head(1000).explore()
+```
+
+### Network Nodes
+
+```{python}
+gdf_nodes = gpd.read_file(config_filepath["in_network_nodes"])
+
+print(f"Loaded {len(gdf_nodes):,} features | CRS: {gdf_nodes.crs}")
+```
+
+```{python}
+#| eval: false
+
+gdf_nodes.head(1000).explore()
+```

@@ -1,0 +1,14 @@
+---
+title: True Shape Network
+subtitle: Creating True Shape Network for Travel Demand Model from UGRC Roadway Centerlines
+description: A short description
+author:
+ - name: Pukar Bhandari
+   email: pukar.bhandari@wfrc.utah.gov
+   affiliation:
+     - name: Wasatch Front Regional Council
+       url: "https://wfrc.utah.gov/"
+date: "2026-03-13"
+---
+
+Refer to Google Docs at: [https://docs.google.com/document/d/1ZHP1oQ9Gucw5fCv4U_dwvMSBbv5BmCBakXJjAcBijns/edit?usp=sharing](https://docs.google.com/document/d/1ZHP1oQ9Gucw5fCv4U_dwvMSBbv5BmCBakXJjAcBijns/edit?usp=sharing) for draft methodology.
