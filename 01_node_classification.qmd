@@ -31,9 +31,9 @@ from _src.node_utils import classify_nodes
 ```{python}
 config_filepath = {
     # Input files
-    "in_centerlines": Path("_data/raw/UtahRoads.gpkg"),
-    "in_network_links": Path("_data/raw/WFv1000_MasterNet - Link.gpkg"),
-    "in_network_nodes": Path("_data/raw/WFv1000_MasterNet - Node.gpkg"),
+    "in_centerlines":      Path("_data/raw/UtahRoads.gpkg"),
+    "in_network_links":    Path("_data/raw/WFv1000_MasterNet - Link.gpkg"),
+    "in_network_nodes":    Path("_data/raw/WFv1000_MasterNet - Node.gpkg"),
     # Output files
     "out_node_classified": Path("_data/processed/nodes_classified.gpkg"),
 }
@@ -50,7 +50,7 @@ print(f"Loaded {len(gdf_centerlines):,} features | CRS: {gdf_centerlines.crs}")
 ```
 
 ```{python}
-# | eval: false
+#| eval: false
 
 gdf_centerlines.head(1000).explore()
 ```
@@ -85,53 +85,81 @@ gdf_nodes.head(1000).explore()
 
 ## Node Classification
 
+### Classification Config
+
+Each entry defines one output column. `criteria` is a list of conditions
+combined with `"combine": "AND"` or `"OR"` (defaults to `"OR"` if omitted).
+
+Supported criteria types:
+
+- `{"type": "ft", "values": [...]}` — node appears in A or B of a link whose
+  FT column matches one of the given values
+- `{"type": "n_range", "ranges": [(lo, hi), ...]}` — node N falls within any
+  of the given ranges, inclusive on both ends
+
+```{python}
+CLASSIFICATION = {
+    "Freeway": {"criteria": [{"type": "ft", "values": list(range(20, 28)) + list(range(30, 40))}]},
+    "Expressway": {"criteria": [{"type": "ft", "values": [12, 13, 14, 15]}]},
+    "Arterial": {"criteria": [{"type": "ft", "values": [2, 3]}]},
+    "Collector": {"criteria": [{"type": "ft", "values": [4, 5]}]},
+    "Local": {"criteria": [{"type": "ft", "values": [6, 7]}]},
+    "Ramp": {"criteria": [{"type": "ft", "values": [28, 29, 41, 42]}]},
+    "CentroidConnector": {"criteria": [{"type": "ft", "values": [1]}]},
+    # Two independent FixedTransit columns to compare methods.
+    # "FixedTransit_byFT": {"criteria": [{"type": "ft", "values": [70, 80]}]},
+    # "FixedTransit_byN": {
+    #     "criteria": [{"type": "n_range", "ranges": [(10_000, 19_999), (50_000, 59_999)]}]
+    # },
+    "FixedTransit": {
+        "criteria": [
+            {"type": "ft", "values": [70, 80]},
+            {"type": "n_range", "ranges": [(10_000, 19_999), (50_000, 59_999)]},
+        ],
+        "combine": "AND",
+    },
+}
+```
+
 ### Classify Nodes
 
 ```{python}
-gdf_nodes_classified = classify_nodes(gdf_nodes, gdf_links, ft_year=2023)
+gdf_nodes_classified = classify_nodes(
+    gdf_nodes,
+    gdf_links,
+    classification=CLASSIFICATION,
+    ft_year=2023,
+)
 
-# Preview classification columns only
-classification_cols = [
-    "N",
-    "Freeway",
-    "Expressway",
-    "Arterial",
-    "Collector",
-    "Local",
-    "Ramp",
-    "CentroidConnector",
-    "FixedTransit_byFT",
-    "FixedTransit_byN",
-    "LinkCount",
-]
+classification_cols = ["N"] + list(CLASSIFICATION.keys()) + ["LinkCount"]
 gdf_nodes_classified[classification_cols].head(20)
 ```
 
 ### Review FixedTransit Methods
 
-Compare the two independent FixedTransit classification methods to decide which to keep.
+Compare the two independent FixedTransit columns to decide which to keep.
 
 ```{python}
+# | eval: false
+
+# Run this only when classifying Nodes into Fixed Transit using two methods
 ft_comparison = gdf_nodes_classified[["N", "FixedTransit_byFT", "FixedTransit_byN"]].copy()
 ft_comparison["agree"] = ft_comparison["FixedTransit_byFT"] == ft_comparison["FixedTransit_byN"]
 
-# Inspect disagreeing rows if any exist
+# Inspect any disagreeing rows
 ft_comparison[~ft_comparison["agree"]]
 ```
 
 ### Summary
 
 ```{python}
-flag_cols = [
-    "Freeway", "Expressway", "Arterial", "Collector", "Local",
-    "Ramp", "CentroidConnector", "FixedTransit_byFT", "FixedTransit_byN",
-]
-gdf_nodes_classified[flag_cols].sum().rename("NodeCount").to_frame()
+gdf_nodes_classified[list(CLASSIFICATION.keys())].sum().rename("NodeCount").to_frame()
 ```
+
+### Checkpoint
 
 ```{python}
 out_path = config_filepath["out_node_classified"]
-
 out_path.parent.mkdir(parents=True, exist_ok=True)
 gdf_nodes_classified.to_file(out_path, driver="GPKG")
 print(f"Classified Nodes saved to: {out_path}")

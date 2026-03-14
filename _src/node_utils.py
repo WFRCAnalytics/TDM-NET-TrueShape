@@ -1,68 +1,69 @@
 """
 Utility functions for network node classification.
+
+This module contains only the mechanical implementation of node classification.
+All business logic (which FT codes map to which road type, which N ranges
+indicate transit nodes) is defined in the calling notebook and passed in as
+arguments. See classify_nodes() for the expected config format.
 """
 
 import geopandas as gpd
 import pandas as pd
 
-# ---------------------------------------------------------------------------
-# Classification config
-# Maps each road type label to the FT_<year> values that define it.
-# Update ft_year argument in classify_nodes() to switch between years.
-# ---------------------------------------------------------------------------
-ROAD_TYPE_FT = {
-    "Freeway": list(range(20, 28)) + list(range(30, 40)),
-    "Expressway": [12, 13, 14, 15],
-    "Arterial": [2, 3],
-    "Collector": [4, 5],
-    "Local": [6, 7],
-    "Ramp": [28, 29, 41, 42],
-    "CentroidConnector": [1],
-    "FixedTransit": [70, 80],
-}
 
-# N value ranges that independently indicate a FixedTransit node (inclusive)
-FIXED_TRANSIT_N_RANGES = [(10_000, 19_999), (50_000, 59_999)]
-
-
-def _nodes_connected_to(links: pd.DataFrame, ft_col: str, ft_values: list[int]) -> set:
+def _nodes_in_ft_values(links: pd.DataFrame, ft_col: str, ft_values: list[int]) -> set:
     """
-    Return the set of node IDs (from columns A and B) connected to links
-    whose ft_col value is in ft_values.
+    Return the set of node IDs connected to links whose ft_col is in ft_values.
     """
     mask = links[ft_col].isin(ft_values)
-    filtered = links.loc[mask, ["A", "B"]]
-    return set(filtered["A"]).union(filtered["B"])
+    return set(links.loc[mask, "A"]).union(links.loc[mask, "B"])
 
 
-def _fixed_transit_by_n_range(n_series: pd.Series) -> pd.Series:
+def _nodes_in_n_ranges(n_series: pd.Series, n_ranges: list[tuple[int, int]]) -> pd.Series:
     """
-    Return boolean Series: True if N falls within any FixedTransit N range.
-    pandas .between() is inclusive on both ends by default.
+    Return a boolean Series: True if N falls within any of the given ranges.
+    Ranges are inclusive on both ends (pandas .between() default).
     """
     mask = pd.Series(False, index=n_series.index)
-    for lo, hi in FIXED_TRANSIT_N_RANGES:
+    for lo, hi in n_ranges:
         mask |= n_series.between(lo, hi)
     return mask
 
 
+def _evaluate_criterion(
+    criterion: dict, n: pd.Series, links: pd.DataFrame, ft_col: str
+) -> pd.Series:
+    """
+    Evaluate a single criterion dict and return a boolean Series.
+
+    Supported criterion types:
+        {"type": "ft", "values": [...]}
+            True if node N appears in A or B of links with ft_col in values.
+
+        {"type": "n_range", "ranges": [(lo, hi), ...]}
+            True if node N falls within any of the given ranges (inclusive).
+    """
+    ctype = criterion["type"]
+
+    if ctype == "ft":
+        connected = _nodes_in_ft_values(links, ft_col, criterion["values"])
+        return n.isin(connected)
+
+    if ctype == "n_range":
+        return _nodes_in_n_ranges(n, criterion["ranges"])
+
+    raise ValueError(f"Unknown criterion type '{ctype}'. Supported types: 'ft', 'n_range'.")
+
+
 def classify_nodes(
-    gdf_nodes: gpd.GeoDataFrame, gdf_links: gpd.GeoDataFrame, ft_year: int = 2023
+    gdf_nodes: gpd.GeoDataFrame,
+    gdf_links: gpd.GeoDataFrame,
+    classification: dict,
+    ft_year: int = 2023,
 ) -> gpd.GeoDataFrame:
     """
-    Add road-type flag columns and a LinkCount column to the nodes GeoDataFrame.
-
-    Road-type flag columns (Boolean):
-        Freeway, Expressway, Arterial, Collector, Local,
-        Ramp, CentroidConnector
-
-    FixedTransit columns (Boolean, two independent methods):
-        FixedTransit_byFT  — True if node appears in FT_<year>=70/80 links
-        FixedTransit_byN   — True if N falls within transit N ranges
-                             (10,000–19,999 or 50,000–59,999, inclusive)
-
-    LinkCount column (int):
-        Number of links whose A or B matches a given node N.
+    Add classification flag columns and a LinkCount column to the nodes
+    GeoDataFrame, based on a user-supplied classification config.
 
     Parameters
     ----------
@@ -70,14 +71,41 @@ def classify_nodes(
         Nodes layer. Must contain column N.
     gdf_links : GeoDataFrame
         Links layer. Must contain columns A, B, and FT_<ft_year>.
+    classification : dict
+        Mapping of output column name to a classification spec. Each spec is
+        a dict with the following keys:
+
+            criteria : list of criterion dicts
+                Each criterion has a "type" key and type-specific keys:
+                    {"type": "ft",      "values": [...]}
+                    {"type": "n_range", "ranges": [(lo, hi), ...]}
+
+            combine : str, optional
+                How to combine multiple criteria: "AND" or "OR".
+                Defaults to "OR" if omitted.
+
+        Example:
+            {
+                "Freeway": {
+                    "criteria": [{"type": "ft", "values": [20, 21, 22]}],
+                },
+                "FixedTransit": {
+                    "criteria": [
+                        {"type": "ft",      "values": [70, 80]},
+                        {"type": "n_range", "ranges": [(10_000, 19_999)]},
+                    ],
+                    "combine": "AND",
+                },
+            }
+
     ft_year : int, optional
         Year suffix for the functional type column. Default is 2023,
-        which resolves to column FT_2023.
+        resolving to FT_2023.
 
     Returns
     -------
     GeoDataFrame
-        Copy of gdf_nodes with new classification columns appended.
+        Copy of gdf_nodes with classification columns and LinkCount appended.
 
     """
     ft_col = f"FT_{ft_year}"
@@ -89,22 +117,24 @@ def classify_nodes(
     n = result["N"]
     links = gdf_links[["A", "B", ft_col]]
 
-    # -- Standard road-type flags -------------------------------------------
-    for label, ft_values in ROAD_TYPE_FT.items():
-        if label == "FixedTransit":
-            continue  # handled separately below
-        connected = _nodes_connected_to(links, ft_col, ft_values)
-        result[label] = n.isin(connected)
+    # -- Classification flags -----------------------------------------------
+    for col_name, spec in classification.items():
+        criteria = spec["criteria"]
+        combine = spec.get("combine", "OR").upper()
 
-    # -- FixedTransit (two independent methods) -----------------------------
-    result["FixedTransit_byFT"] = n.isin(
-        _nodes_connected_to(links, ft_col, ROAD_TYPE_FT["FixedTransit"])
-    )
-    result["FixedTransit_byN"] = _fixed_transit_by_n_range(n)
+        masks = [_evaluate_criterion(criterion, n, links, ft_col) for criterion in criteria]
+
+        if combine == "OR":
+            result[col_name] = pd.concat(masks, axis=1).any(axis=1)
+        elif combine == "AND":
+            result[col_name] = pd.concat(masks, axis=1).all(axis=1)
+        else:
+            raise ValueError(
+                f"Unknown combine value '{combine}' for column '{col_name}'. Use 'AND' or 'OR'."
+            )
 
     # -- LinkCount ----------------------------------------------------------
-    all_nodes_in_links = pd.concat([links["A"], links["B"]])
-    link_counts = all_nodes_in_links.value_counts()
+    link_counts = pd.concat([links["A"], links["B"]]).value_counts()
     result["LinkCount"] = n.map(link_counts).fillna(0).astype(int)
 
     return result

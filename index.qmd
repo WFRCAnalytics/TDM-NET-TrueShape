@@ -12,3 +12,8 @@ date: "2026-03-13"
 ---
 
 Refer to Google Docs at: [https://docs.google.com/document/d/1ZHP1oQ9Gucw5fCv4U_dwvMSBbv5BmCBakXJjAcBijns/edit?usp=sharing](https://docs.google.com/document/d/1ZHP1oQ9Gucw5fCv4U_dwvMSBbv5BmCBakXJjAcBijns/edit?usp=sharing) for draft methodology.
+
+## Steps
+
+1. [Download and Prepare data for Analysis](00_data_preparation.qmd)
+1. [Preprocess and Classify Network Nodes](01_node_classification.qmd)
