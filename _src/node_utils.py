@@ -133,8 +133,28 @@ def classify_nodes(
                 f"Unknown combine value '{combine}' for column '{col_name}'. Use 'AND' or 'OR'."
             )
 
-    # -- LinkCount ----------------------------------------------------------
-    link_counts = pd.concat([links["A"], links["B"]]).value_counts()
-    result["LinkCount"] = n.map(link_counts).fillna(0).astype(int)
+    return result
 
+
+def count_node_links(gdf_nodes: gpd.GeoDataFrame, gdf_links: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """
+    Add a LinkCount column to the nodes GeoDataFrame, counting how many
+    link endpoints (A or B) match each node's N value.
+
+    Parameters
+    ----------
+    gdf_nodes : GeoDataFrame
+        Nodes layer. Must contain column N.
+    gdf_links : GeoDataFrame
+        Links layer. Must contain columns A and B.
+
+    Returns
+    -------
+    GeoDataFrame
+        Copy of gdf_nodes with LinkCount column appended.
+
+    """
+    result = gdf_nodes.copy()
+    link_counts = pd.concat([gdf_links["A"], gdf_links["B"]]).value_counts()
+    result["LinkCount"] = result["N"].map(link_counts).fillna(0).astype(int)
     return result

@@ -23,7 +23,7 @@ import pandas as pd
 import geopandas as gpd
 
 sys.path.insert(0, str(Path.cwd()))
-from _src.node_utils import classify_nodes
+from _src.node_utils import classify_nodes, count_node_links
 ```
 
 ### Filepath Configuration
@@ -31,9 +31,9 @@ from _src.node_utils import classify_nodes
 ```{python}
 config_filepath = {
     # Input files
-    "in_centerlines":      Path("_data/raw/UtahRoads.gpkg"),
-    "in_network_links":    Path("_data/raw/WFv1000_MasterNet - Link.gpkg"),
-    "in_network_nodes":    Path("_data/raw/WFv1000_MasterNet - Node.gpkg"),
+    "in_centerlines": Path("_data/raw/UtahRoads.gpkg"),
+    "in_network_links": Path("_data/raw/WFv1000_MasterNet - Link.gpkg"),
+    "in_network_nodes": Path("_data/raw/WFv1000_MasterNet - Node.gpkg"),
     # Output files
     "out_node_classified": Path("_data/processed/nodes_classified.gpkg"),
 }
@@ -111,6 +111,7 @@ CLASSIFICATION = {
     # "FixedTransit_byN": {
     #     "criteria": [{"type": "n_range", "ranges": [(10_000, 19_999), (50_000, 59_999)]}]
     # },
+    # Combine into one column with AND
     "FixedTransit": {
         "criteria": [
             {"type": "ft", "values": [70, 80]},
@@ -131,7 +132,7 @@ gdf_nodes_classified = classify_nodes(
     ft_year=2023,
 )
 
-classification_cols = ["N"] + list(CLASSIFICATION.keys()) + ["LinkCount"]
+classification_cols = ["N"] + list(CLASSIFICATION.keys())
 gdf_nodes_classified[classification_cols].head(20)
 ```
 
@@ -140,11 +141,12 @@ gdf_nodes_classified[classification_cols].head(20)
 Compare the two independent FixedTransit columns to decide which to keep.
 
 ```{python}
-# | eval: false
-
-# Run this only when classifying Nodes into Fixed Transit using two methods
-ft_comparison = gdf_nodes_classified[["N", "FixedTransit_byFT", "FixedTransit_byN"]].copy()
-ft_comparison["agree"] = ft_comparison["FixedTransit_byFT"] == ft_comparison["FixedTransit_byN"]
+ft_comparison = gdf_nodes_classified[
+    ["N", "FixedTransit_byFT", "FixedTransit_byN"]
+].copy()
+ft_comparison["agree"] = (
+    ft_comparison["FixedTransit_byFT"] == ft_comparison["FixedTransit_byN"]
+)
 
 # Inspect any disagreeing rows
 ft_comparison[~ft_comparison["agree"]]
@@ -156,11 +158,127 @@ ft_comparison[~ft_comparison["agree"]]
 gdf_nodes_classified[list(CLASSIFICATION.keys())].sum().rename("NodeCount").to_frame()
 ```
 
+## Link Count
+
+### Count Links per Node
+
+```{python}
+gdf_nodes_classified = count_node_links(gdf_nodes_classified, gdf_links)
+
+gdf_nodes_classified[["N", "LinkCount"]].head(20)
+```
+
+### Distribution of Link Counts
+
+```{python}
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+
+link_count_freq = gdf_nodes_classified["LinkCount"].value_counts().sort_index()
+max_val = link_count_freq.max()
+
+# -- Colors
+BASE_COLOR = "#B4B2A9"  # c-gray 200  — default
+ACCENT_COLOR = "#1D9E75"  # c-teal 400  — typical intersection nodes (4, 6, 8)
+PSEUDO_COLOR = "#EF9F27"  # c-amber 400 — pseudonodes (2 links)
+LABEL_COLOR = "#444441"  # c-gray 800
+SUBTITLE_COLOR = "#888780"  # c-gray 400
+GRID_COLOR = "#D3D1C7"  # c-gray 100
+
+ACCENT_COUNTS = {4, 6, 8}
+PSEUDO_COUNTS = {2}
+
+
+def bar_color(link_count):
+    if link_count in PSEUDO_COUNTS:
+        return PSEUDO_COLOR
+    if link_count in ACCENT_COUNTS:
+        return ACCENT_COLOR
+    return BASE_COLOR
+
+
+bar_colors = [bar_color(i) for i in link_count_freq.index]
+
+fig, ax = plt.subplots(figsize=(11, 5.5))
+fig.patch.set_facecolor("white")
+ax.set_facecolor("white")
+
+ax.yaxis.grid(True, color=GRID_COLOR, linewidth=0.6, zorder=0)
+ax.set_axisbelow(True)
+
+bars = ax.bar(link_count_freq.index, link_count_freq.values, color=bar_colors, width=0.6, zorder=2)
+
+for bar in bars:
+    h = bar.get_height()
+    ax.text(
+        bar.get_x() + bar.get_width() / 2,
+        h + max_val * 0.012,
+        f"{int(h):,}",
+        ha="center",
+        va="bottom",
+        fontsize=9.5,
+        color=LABEL_COLOR,
+        fontweight="normal",
+    )
+
+for spine in ["top", "right", "left"]:
+    ax.spines[spine].set_visible(False)
+ax.spines["bottom"].set_color(GRID_COLOR)
+
+ax.set_xticks(link_count_freq.index)
+ax.set_xticklabels(link_count_freq.index, fontsize=11, color=LABEL_COLOR)
+ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{int(x):,}"))
+ax.tick_params(axis="y", labelsize=9.5, colors=SUBTITLE_COLOR, length=0)
+ax.tick_params(axis="x", length=0)
+ax.set_ylim(0, max_val * 1.18)
+
+ax.set_xlabel("Number of links connected to node", fontsize=10.5, color=SUBTITLE_COLOR, labelpad=10)
+ax.set_ylabel("")
+
+# -- Inline-colored legend in subtitle style
+legend_elements = [
+    plt.Rectangle((0, 0), 1, 1, color=ACCENT_COLOR),
+    plt.Rectangle((0, 0), 1, 1, color=PSEUDO_COLOR),
+    plt.Rectangle((0, 0), 1, 1, color=BASE_COLOR),
+]
+ax.legend(
+    legend_elements,
+    ["Typical intersection (4, 6, 8)", "Pseudonode (2)", "Other"],
+    loc="upper right",
+    fontsize=9,
+    frameon=False,
+    labelcolor=SUBTITLE_COLOR,
+    handlelength=1,
+    handleheight=0.8,
+)
+
+fig.text(
+    0.13,
+    1.01,
+    "Most nodes connect to 4, 6, or 8 links",
+    fontsize=14,
+    fontweight="bold",
+    color=LABEL_COLOR,
+    transform=ax.transAxes,
+)
+fig.text(
+    0.13,
+    0.94,
+    f"Distribution of {len(gdf_nodes_classified):,} network nodes by link count",
+    fontsize=10.5,
+    color=SUBTITLE_COLOR,
+    transform=ax.transAxes,
+)
+
+plt.tight_layout()
+plt.show()
+```
+
 ### Checkpoint
 
 ```{python}
 out_path = config_filepath["out_node_classified"]
 out_path.parent.mkdir(parents=True, exist_ok=True)
 gdf_nodes_classified.to_file(out_path, driver="GPKG")
-print(f"Classified Nodes saved to: {out_path}")
+print(f"Checkpoint saved to: {out_path}")
 ```
