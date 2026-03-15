@@ -50,15 +50,15 @@ gis_anon = GIS()
 ```
 
 ```{python}
-#| eval: false
-#| echo: false
+# | eval: false
+# | echo: false
 
 # Load project-level .env file
 load_dotenv()
 
 # Authenticated connection for private layers
 gis_auth = GIS(
-    url="https://wfrc.maps.arcgis.com",
+    url=os.getenv("ARCGIS_URL"),
     username=os.getenv("ARCGIS_USERNAME"),
     password=os.getenv("ARCGIS_PASSWORD"),
 )
