@@ -22,9 +22,7 @@ from pathlib import Path
 import pandas as pd
 import geopandas as gpd
 
-from dotenv import load_dotenv
 import os
-
 from arcgis.gis import GIS
 
 # Add project root to path so _src can be imported
@@ -39,6 +37,7 @@ config_filepath = {
     "out_centerlines": Path("_data/raw/UtahRoads.gpkg"),
     "out_network_links": Path("_data/raw/WFv1000_MasterNet - Link.gpkg"),
     "out_network_nodes": Path("_data/raw/WFv1000_MasterNet - Node.gpkg"),
+    "out_gtfs": Path("_data/raw/uta_gtfs.zip"),
 }
 ```
 
@@ -113,6 +112,20 @@ if not out_path.exists():
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     gdf_nodes.to_file(out_path, driver="GPKG")
+    print(f"Saved to: {out_path}")
+else:
+    print(f"File already exists, skipping download: {out_path}")
+```
+
+### UTA GTFS
+
+```{python}
+GTFS_URL = "https://gtfsfeed.rideuta.com/GTFS.zip"
+out_path = config_filepath["out_gtfs"]
+
+if not out_path.exists():
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    urllib.request.urlretrieve(GTFS_URL, out_path)
     print(f"Saved to: {out_path}")
 else:
     print(f"File already exists, skipping download: {out_path}")
