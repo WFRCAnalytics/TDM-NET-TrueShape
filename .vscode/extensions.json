@@ -1,0 +1,9 @@
+{
+  "recommendations": [
+    "meta.pyrefly",
+    "charliermarsh.ruff",
+    "quarto.quarto",
+    "ms-toolsai.jupyter",
+    "ms-python.python"
+  ]
+}

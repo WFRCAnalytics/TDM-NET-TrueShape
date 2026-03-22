@@ -1,0 +1,48 @@
+{
+  // ============================================================
+  // PYTHON ENVIRONMENT & TYPE CHECKING
+  // ============================================================
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python",
+  "python.languageServer": "Pyrefly",
+
+  // ============================================================
+  // RUFF CONFIGURATION
+  // ============================================================
+  "ruff.enable": true,
+  "ruff.nativeServer": "on",
+  "ruff.configurationPreference": "filesystemFirst",
+  "ruff.importStrategy": "fromEnvironment",
+
+  // ============================================================
+  // PYTHON EDITOR BEHAVIOR
+  // ============================================================
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": true,
+    "editor.tabSize": 4,
+    "editor.insertSpaces": true,
+    "editor.codeActionsOnSave": {
+      "source.fixAll.ruff": "explicit",
+      "source.organizeImports.ruff": "explicit"
+    }
+  },
+
+  // ============================================================
+  // JUPYTER NOTEBOOKS
+  // ============================================================
+  "notebook.formatOnSave.enabled": true,
+  "notebook.formatOnCellExecution": true,
+  "notebook.insertFinalNewline": true,
+
+  // ============================================================
+  // REPOSITORY HYGIENE & VISUALS
+  // ============================================================
+  "files.insertFinalNewline": true,
+  "files.trimFinalNewlines": true,
+  "files.trimTrailingWhitespace": true,
+  "editor.rulers": [
+    {"column": 80, "color": "#5a5a5a80"},
+    {"column": 100, "color": "#7a9abf60"},
+    {"column": 120, "color": "#c0504040"}
+  ]
+}
