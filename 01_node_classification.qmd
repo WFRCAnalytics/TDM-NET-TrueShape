@@ -81,10 +81,14 @@ gdf_centerlines.head(1000).explore()
 
 ### Network Links
 
-```{python}
-gdf_links = gpd.read_file(config_filepath["in_network_links"]).to_crs(CRS_UTM)
+Only links present in 2023 (LN_2023 > 0) are loaded. Links with LN_2023 == 0
+are future links that do not yet exist as physical roadways and have no
+corresponding centerline geometry.
 
-print(f"Loaded {len(gdf_links):,} features | CRS: {gdf_links.crs}")
+```{python}
+gdf_links = gpd.read_file(config_filepath["in_network_links"], where="LN_2023 > 0").to_crs(CRS_UTM)
+
+print(f"Loaded {len(gdf_links):,} present-year links (LN_2023 > 0) | CRS: {gdf_links.crs}")
 ```
 
 ```{python}
@@ -119,6 +123,7 @@ gdf_routes = gk.get_routes(feed, as_gdf=True).to_crs(CRS_UTM)
 print(f"Stops: {len(gdf_stops):,} | Shapes: {len(gdf_shapes):,} | Routes: {len(gdf_routes):,}")
 ```
 
+
 ### Rail Stops
 
 Filter GTFS stops to Light Rail (route_type 0) and Commuter Rail (route_type 2) only,
@@ -138,6 +143,12 @@ gdf_rail_stops = gdf_stops[gdf_stops["stop_id"].isin(rail_stop_ids)].copy()
 print(f"Rail stops: {len(gdf_rail_stops):,} of {len(gdf_stops):,} total stops")
 ```
 
+```{python}
+# | eval: false
+
+gdf_rail_stops.explore()
+```
+
 ## Node Classification
 
 ### Functional Type
@@ -149,21 +160,21 @@ To add a column: add a line. To remove: delete it. To change logic: edit in plac
 ```{python}
 FW = list(set(range(20, 28)) | set(range(30, 40)) - {21, 31})  # Freeway FT codes excl. CD
 
-gdf_nodes["Freeway"]          = nodes_on(gdf_nodes, gdf_links, f"FT_2023 in {FW}")
-gdf_nodes["CD"]               = nodes_on(gdf_nodes, gdf_links, "FT_2023 in [21, 31]")
-gdf_nodes["Expressway"]       = nodes_on(gdf_nodes, gdf_links, "FT_2023 in [12, 13, 14, 15]")
-gdf_nodes["Arterial"]         = nodes_on(gdf_nodes, gdf_links, "FT_2023 in [2, 3]")
-gdf_nodes["Collector"]        = nodes_on(gdf_nodes, gdf_links, "FT_2023 in [4, 5]")
-gdf_nodes["Local"]            = nodes_on(gdf_nodes, gdf_links, "FT_2023 in [6, 7]")
-gdf_nodes["Ramp"]             = nodes_on(gdf_nodes, gdf_links, "FT_2023 in [28, 29, 41, 42]")
-gdf_nodes["CentroidConnector"]= nodes_on(gdf_nodes, gdf_links, "FT_2023 == 1")
+gdf_nodes["Freeway"] = nodes_on(gdf_nodes, gdf_links, f"FT_2023 in {FW}")
+gdf_nodes["CD"] = nodes_on(gdf_nodes, gdf_links, "FT_2023 in [21, 31]")
+gdf_nodes["Expressway"] = nodes_on(gdf_nodes, gdf_links, "FT_2023 in [12, 13, 14, 15]")
+gdf_nodes["Arterial"] = nodes_on(gdf_nodes, gdf_links, "FT_2023 in [2, 3]")
+gdf_nodes["Collector"] = nodes_on(gdf_nodes, gdf_links, "FT_2023 in [4, 5]")
+gdf_nodes["Local"] = nodes_on(gdf_nodes, gdf_links, "FT_2023 in [6, 7]")
+gdf_nodes["Ramp"] = nodes_on(gdf_nodes, gdf_links, "FT_2023 in [28, 29, 41, 42]")
+gdf_nodes["CentroidConnector"] = nodes_on(gdf_nodes, gdf_links, "FT_2023 == 1")
 gdf_nodes["CentroidNode"] = gdf_nodes["N"] <= 3_600  # TAZ N: 1–3600
 gdf_nodes["ExternalNode"] = gdf_nodes["N"].between(3_601, 9_999)  # External: 3601–9999
 gdf_nodes["ConnectorOnly"] = (
     gdf_nodes["CentroidConnector"] & ~gdf_nodes["CentroidNode"] & ~gdf_nodes["ExternalNode"]
 )
-gdf_nodes["HOV"]              = nodes_on(gdf_nodes, gdf_links, "FT_2023 in [37, 38]")  # HOV and Managed lanes
-gdf_nodes["FixedTransit"]     = (
+gdf_nodes["HOV"] = nodes_on(gdf_nodes, gdf_links, "FT_2023 in [37, 38]")  # HOV and Managed lanes
+gdf_nodes["FixedTransit"] = (
     nodes_on(gdf_nodes, gdf_links, "FT_2023 in [70, 80]")
     | gdf_nodes["N"].between(10_000, 19_999)
     | gdf_nodes["N"].between(50_000, 59_999)
@@ -527,6 +538,20 @@ exceeded = gdf_nodes_snapped[gdf_nodes_snapped["snap_rule"] == "exceeded_thresho
 fwy_exceeded = exceeded[exceeded["Freeway"] & ~exceeded["HOV"] & (exceeded["LinkCount"] != 2)]
 print(f"\nFreeway nodes NOT snapped (exceeded 500m threshold): {len(fwy_exceeded):,}")
 print(f"  These nodes have no nearby freeway centerline — likely HOV, gaps, or out-of-scope areas.")
+```
+
+### Step 1g — Export Snapped Freeway Nodes for QGIS
+
+```{python}
+# Filter for nodes that successfully snapped to the Freeway rule
+fwy_snapped_export = gdf_nodes_snapped[gdf_nodes_snapped["snap_rule"] == "Freeway"]
+
+# Define an intermediate output path
+fwy_out_path = Path("_data/processed/debug_freeway_snapped.gpkg")
+fwy_out_path.parent.mkdir(parents=True, exist_ok=True)
+
+# Export to GeoPackage
+fwy_snapped_export.to_file(fwy_out_path, driver="GPKG")
 ```
 
 ---
