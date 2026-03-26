@@ -460,11 +460,7 @@ Only run this once you are satisfied with Step 1b/1c.
 gdf_nodes_snapped = gdf_nodes.copy()
 
 gdf_nodes_snapped = snap_nodes(
-    gdf_nodes_snapped,
-    fwy_cl,
-    node_mask=fwy_snap_mask,
-    max_distance_m=500,
-    label="Freeway",
+    gdf_nodes_snapped, fwy_cl, node_mask=fwy_snap_mask, max_distance_m=200, label="Freeway"
 )
 ```
 
@@ -614,14 +610,15 @@ they sit at junctions with freeway mainlines. Those are skipped automatically.
 # CD: DOT_RTNAME position 6 (index 5) == 'C'
 # Exclude pseudonodes (LinkCount == 2). Nodes already snapped by Freeway
 # (snap_rule != 'none') are skipped automatically inside snap_nodes().
-cd_snap_mask = (
-    gdf_nodes_snapped["CD"]
-    & (gdf_nodes_snapped["LinkCount"] != 2)
-)
+cd_snap_mask = gdf_nodes_snapped["CD"] & (gdf_nodes_snapped["LinkCount"] != 2)
 
 print(f"CD nodes total:                  {gdf_nodes_snapped['CD'].sum():,}")
-print(f"  already snapped by Freeway:    {(gdf_nodes_snapped['CD'] & (gdf_nodes_snapped['snap_rule'] != 'none')).sum():,}")
-print(f"  pseudonodes excluded:          {(gdf_nodes_snapped['CD'] & (gdf_nodes_snapped['LinkCount'] == 2)).sum():,}")
+print(
+    f"  already snapped by Freeway:    {(gdf_nodes_snapped['CD'] & (gdf_nodes_snapped['snap_rule'] != 'none')).sum():,}"
+)
+print(
+    f"  pseudonodes excluded:          {(gdf_nodes_snapped['CD'] & (gdf_nodes_snapped['LinkCount'] == 2)).sum():,}"
+)
 print(f"  eligible for CD snap:          {cd_snap_mask.sum():,}")
 
 gdf_nodes_snapped = snap_nodes(

@@ -235,10 +235,14 @@ def _spatial_snap(
     snap_distances_m = []
     snapped_flags = []
 
+    # Mapping dictionary to group directions into Positive (P) and Negative (N)
+    # This solves the "highway bends" issue where NB links meet EB centerlines.
+    DIR_GROUP = {"NB": "P", "EB": "P", "P": "P", "SB": "N", "WB": "N", "N": "N"}
+
     for i, (orig_geom, proj_geom) in enumerate(zip(gdf_nodes.geometry, nodes_proj.geometry)):
-        # Get the allowed directions for this specific node
+        # Get allowed directions and map them to their P/N alias
         node_dir_str = gdf_nodes.iloc[i].get("link_directions", "")
-        node_dirs = set(d for d in node_dir_str.split(",") if d)
+        node_dirs = set(DIR_GROUP.get(d, d) for d in node_dir_str.split(",") if d)
 
         # Query the tree for ALL endpoints within the maximum threshold
         nearby_idx = tree.query(proj_geom, predicate="dwithin", distance=max_distance_m)
@@ -251,12 +255,12 @@ def _spatial_snap(
             for idx in nearby_idx:
                 is_compatible = True
 
-                # If we have directions, enforce the logic
+                # If we have directions, enforce the logic via the P/N groups
                 if has_dirs and node_dirs:
                     target_dir_str = snap_targets.iloc[idx].get("allowed_dirs", "")
-                    target_dirs = set(d for d in target_dir_str.split(",") if d)
+                    target_dirs = set(DIR_GROUP.get(d, d) for d in target_dir_str.split(",") if d)
 
-                    # If target has specific directions, node must share at least one
+                    # If target has specific directions, node must share the P or N group
                     if target_dirs and not node_dirs.intersection(target_dirs):
                         is_compatible = False
 
