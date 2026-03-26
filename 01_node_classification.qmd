@@ -66,7 +66,7 @@ gdf_centerlines = gpd.read_file(
 ).to_crs(CRS_UTM)
 
 # Strip leading/trailing whitespace from string columns (source data artefact)
-for col in ["DOT_FCLASS", "CARTOCODE", "STATUS", "ONEWAY", "VERT_LEVEL"]:
+for col in ["DOT_FCLASS", "CARTOCODE", "STATUS", "ONEWAY", "VERT_LEVEL", "POSTTYPE"]:
     if col in gdf_centerlines.columns:
         gdf_centerlines[col] = gdf_centerlines[col].str.strip()
 
@@ -363,7 +363,7 @@ Check distance distribution BEFORE snapping to confirm the centerline
 coverage is adequate and the threshold is sensible.
 
 ```{python}
-fwy_cl = active_cl[active_cl["DOT_FCLASS"].isin(["Interstate", "Other Freeway"])]
+fwy_cl = active_cl[active_cl["POSTTYPE"].isin(["FWY", "RAMP"])]
 fwy_nodes_eligible = gdf_nodes[fwy_snap_mask].copy()
 
 # Extract deduplicated freeway centerline endpoints
