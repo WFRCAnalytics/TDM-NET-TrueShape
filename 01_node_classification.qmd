@@ -158,10 +158,13 @@ pandas expressions for N-range conditions. Combine with `&` (AND) or `|` (OR).
 To add a column: add a line. To remove: delete it. To change logic: edit in place.
 
 ```{python}
-FW = list(set(range(20, 28)) | set(range(30, 40)) - {21, 31})  # Freeway FT codes excl. CD
+# Freeway FT codes excl. CD (21, 31) and excl. HOV/Managed (37, 38, 39)
+FW = list(set(range(20, 28)) | set(range(30, 37)) - {21, 31})
 
 gdf_nodes["Freeway"] = nodes_on(gdf_nodes, gdf_links, f"FT_2023 in {FW}")
 gdf_nodes["CD"] = nodes_on(gdf_nodes, gdf_links, "FT_2023 in [21, 31]")
+gdf_nodes["HOV"] = nodes_on(gdf_nodes, gdf_links, "FT_2023 in [37, 38]")  # HOV and Managed lanes
+gdf_nodes["ManagedAccess"] = nodes_on(gdf_nodes, gdf_links, "FT_2023 == 39")
 gdf_nodes["Expressway"] = nodes_on(gdf_nodes, gdf_links, "FT_2023 in [12, 13, 14, 15]")
 gdf_nodes["Arterial"] = nodes_on(gdf_nodes, gdf_links, "FT_2023 in [2, 3]")
 gdf_nodes["Collector"] = nodes_on(gdf_nodes, gdf_links, "FT_2023 in [4, 5]")
@@ -173,7 +176,6 @@ gdf_nodes["ExternalNode"] = gdf_nodes["N"].between(3_601, 9_999)  # External: 36
 gdf_nodes["ConnectorOnly"] = (
     gdf_nodes["CentroidConnector"] & ~gdf_nodes["CentroidNode"] & ~gdf_nodes["ExternalNode"]
 )
-gdf_nodes["HOV"] = nodes_on(gdf_nodes, gdf_links, "FT_2023 in [37, 38]")  # HOV and Managed lanes
 gdf_nodes["FixedTransit"] = (
     nodes_on(gdf_nodes, gdf_links, "FT_2023 in [70, 80]")
     | gdf_nodes["N"].between(10_000, 19_999)
@@ -341,20 +343,31 @@ Freeway centerline endpoints. HOV nodes (FT 37/38) and pseudonodes
 ### Step 1a — Build the Snap Mask
 
 ```{python}
-# Nodes eligible for freeway snapping:
-#   - Classified as Freeway
-#   - NOT pseudonodes (LinkCount == 2 means just a shape point, not a true intersection)
-#   - NOT HOV/Managed lane nodes (no matching centerline geometry exists)
-fwy_snap_mask = (
-    gdf_nodes["Freeway"]
-    & (gdf_nodes["LinkCount"] != 2)   # exclude pseudonodes
-    & ~gdf_nodes["HOV"]               # exclude HOV/managed lane nodes
-)
+# Base eligibility:
+#   - Classified as Freeway (Pure HOV is naturally excluded now)
+#   - NOT pseudonodes (LinkCount == 2)
+fwy_base_mask = gdf_nodes["Freeway"] & (gdf_nodes["LinkCount"] != 2)
+
+# TOPOLOGICAL SUBDIVISIONS:
+# 1. Pure Mainline: Touches ONLY freeway links (no ramps, no CDs, no HOT access)
+pure_fwy_mask = fwy_base_mask & ~gdf_nodes["Ramp"] & ~gdf_nodes["CD"] & ~gdf_nodes["ManagedAccess"]
+
+# 2. Junction/Gore: Touches both freeway links AND ramp/CD links
+fwy_junction_mask = fwy_base_mask & (gdf_nodes["Ramp"] | gdf_nodes["CD"])
+
+# 3. Final Snap Mask: Combine the two eligible pools
+# (Notice how Freeway nodes that ONLY touch ManagedAccess are safely left out of this final mask,
+# fulfilling your requirement that they should float rather than snap to the mainline).
+fwy_snap_mask = pure_fwy_mask | fwy_junction_mask
 
 print(f"Total Freeway nodes:          {gdf_nodes['Freeway'].sum():,}")
-print(f"  minus pseudonodes:          {(gdf_nodes['Freeway'] & (gdf_nodes['LinkCount'] == 2)).sum():,}")
-print(f"  minus HOV nodes:            {(gdf_nodes['Freeway'] & gdf_nodes['HOV']).sum():,}")
-print(f"Eligible for snapping:        {fwy_snap_mask.sum():,}")
+print(
+    f"  minus pseudonodes:          {(gdf_nodes['Freeway'] & (gdf_nodes['LinkCount'] == 2)).sum():,}"
+)
+print(f"Eligible base Freeway nodes:  {fwy_base_mask.sum():,}")
+print(f"  -> Pure Mainline nodes:     {pure_fwy_mask.sum():,}")
+print(f"  -> Junction nodes:          {fwy_junction_mask.sum():,}")
+print(f"  -> Floating Managed Access: {(fwy_base_mask & ~fwy_snap_mask).sum():,}")
 ```
 
 ### Step 1b — Pre-Snap Validation
@@ -459,8 +472,26 @@ Only run this once you are satisfied with Step 1b/1c.
 ```{python}
 gdf_nodes_snapped = gdf_nodes.copy()
 
+# Centerline pools
+pure_fwy_cl = active_cl[active_cl["POSTTYPE"] == "FWY"]
+combo_fwy_cl = active_cl[active_cl["POSTTYPE"].isin(["FWY", "RAMP"])]
+
+# Pass 1: Snap Pure Mainline nodes ONLY to FWY centerlines
 gdf_nodes_snapped = snap_nodes(
-    gdf_nodes_snapped, fwy_cl, node_mask=fwy_snap_mask, max_distance_m=500, label="Freeway"
+    gdf_nodes_snapped,
+    pure_fwy_cl,
+    node_mask=pure_fwy_mask,
+    max_distance_m=500,
+    label="Freeway_Mainline",
+)
+
+# Pass 2: Snap Junction nodes to FWY or RAMP centerlines
+gdf_nodes_snapped = snap_nodes(
+    gdf_nodes_snapped,
+    combo_fwy_cl,
+    node_mask=fwy_junction_mask,
+    max_distance_m=500,
+    label="Freeway_Junction",
 )
 ```
 
@@ -470,12 +501,15 @@ Compare original (red) vs snapped (green) positions.
 Connector lines show how far each node moved.
 
 ```{python}
-#| eval: false
+# | eval: false
 
-fwy_snapped = gdf_nodes_snapped[gdf_nodes_snapped["snap_rule"] == "Freeway"]
+# UPDATE: Filter for both Mainline and Junction labels
+fwy_snapped = gdf_nodes_snapped[
+    gdf_nodes_snapped["snap_rule"].isin(["Freeway_Mainline", "Freeway_Junction"])
+]
 fwy_original = gdf_nodes.loc[fwy_snapped.index]
 
-fwy_snapped_wgs  = fwy_snapped.to_crs(CRS_WGS)
+fwy_snapped_wgs = fwy_snapped.to_crs(CRS_WGS)
 fwy_original_wgs = fwy_original.to_crs(CRS_WGS)
 
 connectors = []
@@ -483,9 +517,13 @@ for idx in fwy_snapped.index:
     orig = fwy_original_wgs.geometry.loc[idx]
     snap = fwy_snapped_wgs.geometry.loc[idx]
     if orig.distance(snap) > 0:
-        connectors.append({"geometry": LineString([orig, snap]),
-                           "N": int(fwy_snapped.loc[idx, "N"]),
-                           "dist_m": float(fwy_snapped.loc[idx, "snap_distance_m"])})
+        connectors.append(
+            {
+                "geometry": LineString([orig, snap]),
+                "N": int(fwy_snapped.loc[idx, "N"]),
+                "dist_m": float(fwy_snapped.loc[idx, "snap_distance_m"]),
+            }
+        )
 gdf_fwy_connectors = gpd.GeoDataFrame(connectors, crs=CRS_WGS)
 
 center = [fwy_original_wgs.geometry.y.mean(), fwy_original_wgs.geometry.x.mean()]
@@ -495,7 +533,9 @@ conn_layer = folium.FeatureGroup(name="Displacement lines", show=True)
 for _, row in gdf_fwy_connectors.iterrows():
     folium.PolyLine(
         [(c[1], c[0]) for c in row.geometry.coords],
-        color="#888780", weight=1, opacity=0.7,
+        color="#888780",
+        weight=1,
+        opacity=0.7,
         tooltip=f"N: {row['N']} | moved {row['dist_m']}m",
     ).add_to(conn_layer)
 conn_layer.add_to(m_post_fwy)
@@ -503,18 +543,26 @@ conn_layer.add_to(m_post_fwy)
 orig_layer = folium.FeatureGroup(name="Original positions", show=True)
 for idx, row in fwy_original_wgs.iterrows():
     folium.CircleMarker(
-        location=[row.geometry.y, row.geometry.x], radius=4,
-        color="#E24B4A", fill=True, fill_opacity=0.8,
+        location=[row.geometry.y, row.geometry.x],
+        radius=4,
+        color="#E24B4A",
+        fill=True,
+        fill_opacity=0.8,
         tooltip=f"N: {gdf_nodes.loc[idx, 'N']} (original)",
     ).add_to(orig_layer)
 orig_layer.add_to(m_post_fwy)
 
 snap_layer = folium.FeatureGroup(name="Snapped positions", show=True)
 for idx, row in fwy_snapped_wgs.iterrows():
+    # Adding the rule to the tooltip so you can see if it was Mainline or Junction
+    rule = fwy_snapped.loc[idx, "snap_rule"]
     folium.CircleMarker(
-        location=[row.geometry.y, row.geometry.x], radius=4,
-        color="#1D9E75", fill=True, fill_opacity=0.8,
-        tooltip=f"N: {int(fwy_snapped.loc[idx, 'N'])} | {fwy_snapped.loc[idx, 'snap_distance_m']}m",
+        location=[row.geometry.y, row.geometry.x],
+        radius=4,
+        color="#1D9E75" if rule == "Freeway_Mainline" else "#534AB7",
+        fill=True,
+        fill_opacity=0.8,
+        tooltip=f"N: {int(fwy_snapped.loc[idx, 'N'])} | {rule} | {fwy_snapped.loc[idx, 'snap_distance_m']}m",
     ).add_to(snap_layer)
 snap_layer.add_to(m_post_fwy)
 
@@ -547,8 +595,10 @@ print(f"  These nodes have no nearby freeway centerline — likely HOV, gaps, or
 from shapely.geometry import LineString
 import geopandas as gpd
 
-# 1. Filter for nodes that successfully snapped to the Freeway rule
-fwy_snapped = gdf_nodes_snapped[gdf_nodes_snapped["snap_rule"] == "Freeway"].copy()
+# 1. Filter for nodes that successfully snapped to either Freeway rule
+fwy_snapped = gdf_nodes_snapped[
+    gdf_nodes_snapped["snap_rule"].isin(["Freeway_Mainline", "Freeway_Junction"])
+].copy()
 
 # 2. Get their corresponding original positions
 fwy_original = gdf_nodes.loc[fwy_snapped.index].copy()
@@ -563,6 +613,7 @@ for idx in fwy_snapped.index:
         lines.append(
             {
                 "N": fwy_snapped.loc[idx, "N"],
+                "snap_rule": fwy_snapped.loc[idx, "snap_rule"],
                 "snap_distance_m": fwy_snapped.loc[idx, "snap_distance_m"],
                 "geometry": LineString([orig_geom, snap_geom]),
             }
@@ -571,11 +622,10 @@ for idx in fwy_snapped.index:
 gdf_fwy_lines = (
     gpd.GeoDataFrame(lines, crs=CRS_UTM)
     if lines
-    else gpd.GeoDataFrame(columns=["N", "snap_distance_m", "geometry"], crs=CRS_UTM)
+    else gpd.GeoDataFrame(columns=["N", "snap_rule", "snap_distance_m", "geometry"], crs=CRS_UTM)
 )
 
 # 4. Filter for Freeway nodes that exceeded the threshold (unsnapped)
-# We use fwy_snap_mask to ensure we only get nodes that were *eligible* for freeway snapping
 fwy_unsnapped = gdf_nodes_snapped[
     fwy_snap_mask & (gdf_nodes_snapped["snap_rule"] == "exceeded_threshold")
 ].copy()
