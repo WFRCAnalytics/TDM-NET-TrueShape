@@ -208,3 +208,6 @@ __marimo__/
 
 # Data files
 _data
+
+/.quarto/
+**/*.quarto_ipynb

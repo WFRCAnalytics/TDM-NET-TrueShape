@@ -673,7 +673,7 @@ print(f"  eligible for CD snap:          {cd_snap_mask.sum():,}")
 
 gdf_nodes_snapped = snap_nodes(
     gdf_nodes_snapped,
-    active_cl[active_cl["DOT_RTNAME"].str[5] == "C"],
+    active_cl[(active_cl["DOT_RTNAME"].str[5] == "C") | (active_cl["POSTTYPE"] == "RAMP")],
     node_mask=cd_snap_mask,
     max_distance_m=300,
     label="CD",
@@ -685,19 +685,20 @@ gdf_nodes_snapped = snap_nodes(
 ```{python}
 # Ramp: DOT_RTNAME position 6 (index 5) == 'R'
 # Exclude pseudonodes. Nodes already snapped by Freeway are skipped automatically.
-ramp_snap_mask = (
-    gdf_nodes_snapped["Ramp"]
-    & (gdf_nodes_snapped["LinkCount"] != 2)
-)
+ramp_snap_mask = gdf_nodes_snapped["Ramp"] & (gdf_nodes_snapped["LinkCount"] != 2)
 
 print(f"Ramp nodes total:                {gdf_nodes_snapped['Ramp'].sum():,}")
-print(f"  already snapped by Freeway:    {(gdf_nodes_snapped['Ramp'] & (gdf_nodes_snapped['snap_rule'] != 'none')).sum():,}")
-print(f"  pseudonodes excluded:          {(gdf_nodes_snapped['Ramp'] & (gdf_nodes_snapped['LinkCount'] == 2)).sum():,}")
+print(
+    f"  already snapped by Freeway:    {(gdf_nodes_snapped['Ramp'] & (gdf_nodes_snapped['snap_rule'] != 'none')).sum():,}"
+)
+print(
+    f"  pseudonodes excluded:          {(gdf_nodes_snapped['Ramp'] & (gdf_nodes_snapped['LinkCount'] == 2)).sum():,}"
+)
 print(f"  eligible for Ramp snap:        {ramp_snap_mask.sum():,}")
 
 gdf_nodes_snapped = snap_nodes(
     gdf_nodes_snapped,
-    active_cl[active_cl["DOT_RTNAME"].str[5] == "R"],
+    active_cl[(active_cl["DOT_RTNAME"].str[5] == "R") | (active_cl["POSTTYPE"] == "RAMP")],
     node_mask=ramp_snap_mask,
     max_distance_m=300,
     label="Ramp",
@@ -910,6 +911,80 @@ bool_cols = [c for c in gdf_nodes_snapped.columns if gdf_nodes_snapped[c].dtype 
 gdf_nodes_snapped[gdf_nodes_snapped["snap_rule"] == "exceeded_threshold"][
     ["N", "snap_distance_m"] + bool_cols
 ].sort_values("snap_distance_m", ascending=False)
+```
+
+### Conflation Performance Metrics
+
+```{python}
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import numpy as np
+
+# 1. Isolate successfully snapped nodes
+snapped_nodes = gdf_nodes_snapped[gdf_nodes_snapped["snapped"] == True]
+
+# 2. Generate KPI Table
+kpi_table = (
+    snapped_nodes.groupby("snap_rule")["snap_distance_m"]
+    .agg(
+        Nodes_Snapped="count",
+        Median_Dist_m="median",
+        P90_Dist_m=lambda x: np.percentile(x, 90),
+        Max_Dist_m="max",
+    )
+    .round(1)
+)
+
+print("=== SNAPPING PERFORMANCE KPIs ===")
+print(kpi_table.to_string())
+print(
+    "\nTotal Nodes Exceeding Threshold:",
+    (gdf_nodes_snapped["snap_rule"] == "exceeded_threshold").sum(),
+)
+
+# 3. Generate ECDF Plot
+fig, ax = plt.subplots(figsize=(10, 6))
+fig.patch.set_facecolor("white")
+ax.set_facecolor("white")
+
+# Define consistent colors for your rules
+color_map = {
+    "Freeway_Mainline": "#1D9E75",
+    "Freeway_Junction": "#534AB7",
+    "CD": "#EF9F27",
+    "Ramp": "#E24B4A",
+    "Surface": "#378ADD",
+    "FixedTransit_Rail": "#888780",
+}
+
+# Plot a cumulative step curve for each rule
+for rule, group_data in snapped_nodes.groupby("snap_rule"):
+    distances = np.sort(group_data["snap_distance_m"].dropna())
+    # Calculate cumulative probability
+    y = np.arange(1, len(distances) + 1) / len(distances)
+
+    ax.step(
+        distances,
+        y,
+        where="post",
+        label=f"{rule} (n={len(distances):,})",
+        color=color_map.get(rule, "#000000"),
+        linewidth=2,
+    )
+
+# Formatting
+ax.set_xlim(0, 200)  # Zoom in on the first 200m to see micro-improvements
+ax.set_ylim(0, 1.05)
+ax.yaxis.set_major_formatter(mticker.PercentFormatter(1.0))
+ax.grid(True, linestyle="--", alpha=0.6)
+
+ax.set_title("Algorithm Precision: Cumulative Snapping Distances", fontsize=14, pad=15)
+ax.set_xlabel("Displacement Distance (meters)", fontsize=11)
+ax.set_ylabel("Percentage of Nodes Snapped", fontsize=11)
+ax.legend(loc="lower right", fontsize=10, frameon=True)
+
+plt.tight_layout()
+plt.show()
 ```
 
 ### Export
