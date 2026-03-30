@@ -376,7 +376,15 @@ Check distance distribution BEFORE snapping to confirm the centerline
 coverage is adequate and the threshold is sensible.
 
 ```{python}
-fwy_cl = active_cl[active_cl["POSTTYPE"].isin(["FWY", "RAMP"])]
+# 1. Mainline: Must be officially classified as a Freeway/Expressway, OR locally tagged as FWY.
+is_mainline = active_cl["DOT_FCLASS"].isin(["Interstate", "Other Freeways and Expressways"]) | (
+    active_cl["POSTTYPE"] == "FWY"
+)
+# 2. Ramps: Must be an official UDOT Ramp (LRS 6th char 'R') OR locally tagged as RAMP.
+is_ramp = (active_cl["DOT_RTNAME"].str[5] == "R") | (active_cl["POSTTYPE"] == "RAMP")
+
+# For pre-validation, we want to look at the combined pool
+fwy_cl = active_cl[is_mainline | is_ramp]
 fwy_nodes_eligible = gdf_nodes[fwy_snap_mask].copy()
 
 print(f"Eligible freeway nodes:       {len(fwy_nodes_eligible):,}")
@@ -450,11 +458,22 @@ Only run this once you are satisfied with Step 1b/1c.
 ```{python}
 gdf_nodes_snapped = gdf_nodes.copy()
 
-# Centerline pools
-pure_fwy_cl = active_cl[active_cl["POSTTYPE"] == "FWY"]
-combo_fwy_cl = active_cl[active_cl["POSTTYPE"].isin(["FWY", "RAMP"])]
+# ==========================================
+# CENTERLINE POOLS (The Bulletproof Hybrid)
+# ==========================================
+# 1. Mainline: Must be officially classified as a Freeway/Expressway, OR locally tagged as FWY.
+# This rescues SR-201 which has a garbage "()" POSTTYPE but a correct DOT_FCLASS.
+is_mainline = active_cl["DOT_FCLASS"].isin(["Interstate", "Other Freeways and Expressways"]) | (
+    active_cl["POSTTYPE"] == "FWY"
+)
 
-# Pass 1: Snap Pure Mainline nodes ONLY to FWY centerlines
+# 2. Ramps: Must be an official UDOT Ramp (LRS 6th char 'R') OR locally tagged as RAMP.
+is_ramp = (active_cl["DOT_RTNAME"].str[5] == "R") | (active_cl["POSTTYPE"] == "RAMP")
+
+pure_fwy_cl = active_cl[is_mainline]
+combo_fwy_cl = active_cl[is_mainline | is_ramp]
+
+# Pass 1: Snap Pure Mainline nodes ONLY to Mainline centerlines
 gdf_nodes_snapped = snap_nodes(
     gdf_nodes_snapped,
     pure_fwy_cl,
@@ -463,7 +482,7 @@ gdf_nodes_snapped = snap_nodes(
     label="Freeway_Mainline",
 )
 
-# Pass 2: Snap Junction nodes to FWY or RAMP centerlines
+# Pass 2: Snap Junction nodes to Mainline OR Ramp centerlines
 gdf_nodes_snapped = snap_nodes(
     gdf_nodes_snapped,
     combo_fwy_cl,
