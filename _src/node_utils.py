@@ -342,45 +342,48 @@ def _spatial_snap(
 
     # --- 3a. Build preference structures ---
 
-    # node_prefs[n_idx] = list of endpoint proposal dicts, ordered by
-    #   (tier, dist_ep, dist_target). Each node proposes in this order.
-    node_prefs = defaultdict(list)
+    # temp_node_prefs[n_idx][ep_id] = best proposal payload
+    temp_node_prefs = defaultdict(dict)
 
-    # ep_node_dist[ep_id][n_idx] = (tier, dist_ep)
-    # Endpoints use this to compare competing nodes. Tuple comparison
-    # means tier is always checked before distance — a correct-direction
-    # node (tier 0) at 50 m beats a wrong-direction node (tier 1) at 1 m.
-    #
-    # FIX 1: store (tier, dist_ep) not just dist_ep so endpoints respect
-    #         direction when choosing between competing nodes.
-    # FIX 2: keep only the best (lowest) (tier, dist_ep) per (ep_id, n_idx)
-    #         pair, handling the case where two segments share an endpoint
-    #         and a node is within range of both.
+    # ep_node_dist[ep_id][n_idx] = (tier, dist_ep, n_idx)
+    # n_idx is added to the tuple to guarantee deterministic tie-breaking!
     ep_node_dist: dict[tuple, dict[int, tuple]] = defaultdict(dict)
 
     for bid in all_candidates:
         match_tier, dist_target, dist_ep, n_idx, ep_id, geom_orig, t_idx, is_start = bid
 
-        node_prefs[n_idx].append(
-            {
-                "tier": match_tier,
-                "dist_ep": dist_ep,
-                "dist_target": dist_target,  # tie-breaker only
-                "ep_id": ep_id,
-                "geom_orig": geom_orig,
-                "t_idx": t_idx,
-                "is_start": is_start,
-            }
-        )
+        payload = {
+            "tier": match_tier,
+            "dist_ep": dist_ep,
+            "dist_target": dist_target,
+            "ep_id": ep_id,
+            "geom_orig": geom_orig,
+            "t_idx": t_idx,
+            "is_start": is_start,
+        }
 
-        # FIX 1 + FIX 2: store (tier, dist_ep) and keep the best per pair
-        new_score = (match_tier, dist_ep)
-        existing_score = ep_node_dist[ep_id].get(n_idx, (999, float("inf")))
+        # Deduplicate node preferences for the same physical endpoint
+        if ep_id not in temp_node_prefs[n_idx]:
+            temp_node_prefs[n_idx][ep_id] = payload
+        else:
+            existing = temp_node_prefs[n_idx][ep_id]
+            if (match_tier, dist_ep, dist_target) < (
+                existing["tier"],
+                existing["dist_ep"],
+                existing["dist_target"],
+            ):
+                temp_node_prefs[n_idx][ep_id] = payload
+
+        # Endpoint scoring (tier, dist_ep, n_idx)
+        new_score = (match_tier, dist_ep, n_idx)
+        existing_score = ep_node_dist[ep_id].get(n_idx, (999, float("inf"), -1))
         if new_score < existing_score:
             ep_node_dist[ep_id][n_idx] = new_score
 
-    # Sort each node's preference list: tier → dist_ep → dist_target (tie-breaker)
-    for n_idx in node_prefs:
+    # Convert deduplicated dicts back to sorted lists
+    node_prefs = defaultdict(list)
+    for n_idx, ep_dict in temp_node_prefs.items():
+        node_prefs[n_idx] = list(ep_dict.values())
         node_prefs[n_idx].sort(key=lambda x: (x["tier"], x["dist_ep"], x["dist_target"]))
 
     # --- 3b. Node-proposing Gale-Shapley loop ---
@@ -576,7 +579,7 @@ def snap_transit(
 
     candidate_nodes = result.loc[candidate_idx]
     snapped_geoms, distances, flags, attrs = _spatial_snap(
-        candidate_nodes, gdf_stops.geometry, max_distance_m, crs_projected, target_id_cols
+        candidate_nodes, gdf_stops, max_distance_m, crs_projected, target_id_cols
     )
 
     # Pre-create attribute columns
