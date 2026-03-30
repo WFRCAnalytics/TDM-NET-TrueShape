@@ -169,15 +169,21 @@ def _spatial_snap(
     snap_targets: gpd.GeoDataFrame | gpd.GeoSeries,
     max_distance_m: float,
     crs_projected: str,
-) -> tuple[list, list, list]:
+    target_id_cols: list[str] = None,
+) -> tuple[list, list, list, dict]:
     """
     Snap nodes using Segment-First (Point-to-Line-to-Point) logic.
-    Uses Tiered Global Greedy Assignment (Strict Dir > Relaxed Dir > Distance)
-    to resolve collisions and handle micro-geometry curves.
+    Extracts GERS lineage attributes and calculates precise ALRS mileposts.
     """
     nodes_proj = gdf_nodes.to_crs(crs_projected)
+    num_nodes = len(gdf_nodes)
 
-    # 1. Adapt to LineStrings (Roads) vs Points (GTFS)
+    # Prepare GERS attribute dictionary
+    snapped_attrs = {}
+    if target_id_cols and isinstance(snap_targets, gpd.GeoDataFrame):
+        for col in target_id_cols:
+            snapped_attrs[col] = [None] * num_nodes
+
     is_lines = False
     if isinstance(snap_targets, gpd.GeoDataFrame):
         geom_types = snap_targets.geometry.type.unique()
@@ -186,6 +192,9 @@ def _spatial_snap(
             snap_targets = _assign_line_directions(snap_targets)
             targets_proj = snap_targets.to_crs(crs_projected)
             has_dirs = True
+            # Setup dynamic milepost extraction if ALRS columns exist
+            if "DOT_F_MILE" in snap_targets.columns and "DOT_T_MILE" in snap_targets.columns:
+                snapped_attrs["milepost"] = [np.nan] * num_nodes
         else:
             targets_proj = snap_targets.to_crs(crs_projected)
             has_dirs = "allowed_dirs" in snap_targets.columns
@@ -212,7 +221,6 @@ def _spatial_snap(
         nodes_proj.geometry.values[node_indices], target_geoms_proj[target_indices]
     )
 
-    # Pre-compute TWO sets: Exact and Grouped (P/N)
     node_dirs_exact = [
         set(d for d in str(d_str).split(",") if d)
         for d_str in gdf_nodes.get("link_directions", pd.Series([""] * len(gdf_nodes)))
@@ -233,7 +241,7 @@ def _spatial_snap(
         ]
 
     # ==========================================
-    # PHASE 2: Generate Segment-First Bids with Tiers
+    # PHASE 2: Generate Segment-First Bids
     # ==========================================
     all_candidates = []
     for i in range(len(node_indices)):
@@ -242,20 +250,19 @@ def _spatial_snap(
         dist_target = distances_to_target[i]
         proj_node = nodes_proj.geometry.values[n_idx]
 
-        match_tier = 0  # Default to 0 (Strict Match)
+        match_tier = 0
         is_compatible = True
 
         if has_dirs:
             n_exact, n_grp = node_dirs_exact[n_idx], node_dirs_grp[n_idx]
             t_exact, t_grp = target_dirs_exact[t_idx], target_dirs_grp[t_idx]
-
             if t_exact and n_exact:
                 if n_exact.intersection(t_exact):
-                    match_tier = 0  # Strict Match (e.g., EB to EB)
+                    match_tier = 0
                 elif n_grp.intersection(t_grp):
-                    match_tier = 1  # Relaxed Match (e.g., EB to NB curve)
+                    match_tier = 1
                 else:
-                    is_compatible = False  # Complete mismatch (e.g., EB to WB)
+                    is_compatible = False
 
         if is_compatible:
             if is_lines:
@@ -281,40 +288,50 @@ def _spatial_snap(
                 id_start = (round(p_start.x, 3), round(p_start.y, 3))
                 id_end = (round(p_end.x, 3), round(p_end.y, 3))
 
+                # Tuple expanded to track target_index (t_idx) and whether it is the start (True/False)
                 if dist_start <= max_distance_m:
                     all_candidates.append(
-                        (match_tier, dist_target, dist_start, n_idx, id_start, o_start)
+                        (match_tier, dist_target, dist_start, n_idx, id_start, o_start, t_idx, True)
                     )
                 if dist_end <= max_distance_m:
-                    all_candidates.append((match_tier, dist_target, dist_end, n_idx, id_end, o_end))
+                    all_candidates.append(
+                        (match_tier, dist_target, dist_end, n_idx, id_end, o_end, t_idx, False)
+                    )
             else:
                 orig_pt = target_geoms_orig[t_idx]
                 dist_pt = proj_node.distance(target_geoms_proj[t_idx])
                 id_pt = (round(target_geoms_proj[t_idx].x, 3), round(target_geoms_proj[t_idx].y, 3))
                 if dist_pt <= max_distance_m:
-                    all_candidates.append((match_tier, dist_target, dist_pt, n_idx, id_pt, orig_pt))
+                    all_candidates.append(
+                        (match_tier, dist_target, dist_pt, n_idx, id_pt, orig_pt, t_idx, None)
+                    )
 
     # ==========================================
-    # PHASE 3: Global Sort (Tier > Topology > Topography)
+    # PHASE 3: Global Sort
     # ==========================================
-    # 1. match_tier (0 is better than 1)
-    # 2. dist_target (closer to the physical line is better)
-    # 3. dist_endpoint (closer to the endpoint is better)
     all_candidates.sort(key=lambda x: (x[0], x[1], x[2]))
 
     # ==========================================
-    # PHASE 4: The Claiming Process
+    # PHASE 4: The Claiming Process & GERS Extraction
     # ==========================================
     claimed_nodes = set()
     claimed_endpoints = set()
 
-    num_nodes = len(gdf_nodes)
     snapped_geoms = [None] * num_nodes
     snap_distances_m = [None] * num_nodes
     snapped_flags = [False] * num_nodes
 
-    # Unpack bid: (match_tier, dist_target, dist_endpoint, node_idx, endpoint_id, endpoint_geom_orig)
-    for _, _, dist_endpoint, node_idx, endpoint_id, endpoint_geom_orig in all_candidates:
+    # Unpack bid with target index and start/end flag
+    for (
+        _,
+        _,
+        dist_endpoint,
+        node_idx,
+        endpoint_id,
+        endpoint_geom_orig,
+        t_idx,
+        is_start,
+    ) in all_candidates:
         if node_idx not in claimed_nodes and endpoint_id not in claimed_endpoints:
             claimed_nodes.add(node_idx)
             claimed_endpoints.add(endpoint_id)
@@ -322,6 +339,21 @@ def _spatial_snap(
             snapped_geoms[node_idx] = endpoint_geom_orig
             snap_distances_m[node_idx] = round(dist_endpoint, 2)
             snapped_flags[node_idx] = True
+
+            # Extract requested GERS attributes
+            if target_id_cols and isinstance(snap_targets, gpd.GeoDataFrame):
+                for col in target_id_cols:
+                    if col in snap_targets.columns:
+                        snapped_attrs[col][node_idx] = snap_targets.iloc[t_idx][col]
+
+            # Dynamically extract correct ALRS Milepost
+            if is_lines and "milepost" in snapped_attrs:
+                mp = (
+                    snap_targets.iloc[t_idx]["DOT_F_MILE"]
+                    if is_start
+                    else snap_targets.iloc[t_idx]["DOT_T_MILE"]
+                )
+                snapped_attrs["milepost"][node_idx] = mp
 
     # Handle Leftovers
     for i, (orig_geom, proj_geom) in enumerate(zip(gdf_nodes.geometry, nodes_proj.geometry)):
@@ -332,12 +364,11 @@ def _spatial_snap(
                 if nearest_idx is not None
                 else np.nan
             )
-
             snapped_geoms[i] = orig_geom
             snap_distances_m[i] = round(abs_distance_m, 2) if pd.notna(abs_distance_m) else np.nan
             snapped_flags[i] = False
 
-    return snapped_geoms, snap_distances_m, snapped_flags
+    return snapped_geoms, snap_distances_m, snapped_flags, snapped_attrs
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +382,7 @@ def snap_nodes(
     node_mask: pd.Series,
     max_distance_m: float,
     label: str,
+    target_id_cols: list[str] = None,
     crs_projected: str = "EPSG:26912",
 ) -> gpd.GeoDataFrame:
     """Snap nodes to the endpoints of pre-filtered centerlines."""
@@ -375,15 +407,27 @@ def snap_nodes(
     )
 
     candidate_nodes = result.loc[candidate_idx]
-    snapped_geoms, distances, flags = _spatial_snap(
-        candidate_nodes, gdf_centerlines_filtered, max_distance_m, crs_projected
+    snapped_geoms, distances, flags, attrs = _spatial_snap(
+        candidate_nodes, gdf_centerlines_filtered, max_distance_m, crs_projected, target_id_cols
     )
 
-    for idx, geom, dist, snapped_flag in zip(candidate_idx, snapped_geoms, distances, flags):
+    # Pre-create attribute columns to avoid SettingWithCopy warnings
+    for col in attrs.keys():
+        col_name = f"snapped_{col}"
+        if col_name not in result.columns:
+            result[col_name] = None
+
+    for i, (idx, geom, dist, snapped_flag) in enumerate(
+        zip(candidate_idx, snapped_geoms, distances, flags)
+    ):
         result.at[idx, "geometry"] = geom
         result.at[idx, "snap_distance_m"] = dist
         result.at[idx, "snapped"] = snapped_flag
         result.at[idx, "snap_rule"] = label if snapped_flag else "exceeded_threshold"
+
+        # Apply GERS attributes
+        for col, values_list in attrs.items():
+            result.at[idx, f"snapped_{col}"] = values_list[i]
 
     snapped = sum(flags)
     exceeded = len(flags) - snapped
@@ -398,36 +442,10 @@ def snap_transit(
     node_mask: pd.Series,
     max_distance_m: float = 200,
     label: str = "FixedTransit_GTFS",
+    target_id_cols: list[str] = None,
     crs_projected: str = "EPSG:26912",
 ) -> gpd.GeoDataFrame:
-    """
-    Snap a subset of nodes to the nearest GTFS stop point.
-
-    Follows the same first-call-wins pattern as snap_nodes() — nodes already
-    snapped by a previous call are automatically skipped.
-
-    Parameters
-    ----------
-    gdf_nodes : GeoDataFrame
-        Nodes layer. Pass the result of previous snap calls to chain.
-    gdf_stops : GeoDataFrame
-        GTFS stops layer with Point geometry.
-    node_mask : pd.Series
-        Boolean Series aligned to gdf_nodes.index selecting candidate nodes.
-        e.g. gdf_nodes["FixedTransit"]
-    max_distance_m : float, optional
-        Nodes further than this threshold are not moved. Default 200m.
-    label : str, optional
-        Written to the snap_rule audit column. Default 'FixedTransit_GTFS'.
-    crs_projected : str, optional
-        Projected CRS for metric distances. Default EPSG:26912 (UTM 12N).
-
-    Returns
-    -------
-    GeoDataFrame
-        Copy of gdf_nodes with updated geometry and audit columns.
-
-    """
+    """Snap a subset of nodes to the nearest GTFS stop point."""
     result = gdf_nodes.copy()
 
     if "snap_rule" not in result.columns:
@@ -445,15 +463,26 @@ def snap_transit(
     print(f"  [{label}] {len(candidate_idx):,} nodes → {len(gdf_stops):,} stops")
 
     candidate_nodes = result.loc[candidate_idx]
-    snapped_geoms, distances, flags = _spatial_snap(
-        candidate_nodes, gdf_stops.geometry, max_distance_m, crs_projected
+    snapped_geoms, distances, flags, attrs = _spatial_snap(
+        candidate_nodes, gdf_stops.geometry, max_distance_m, crs_projected, target_id_cols
     )
 
-    for idx, geom, dist, snapped_flag in zip(candidate_idx, snapped_geoms, distances, flags):
+    # Pre-create attribute columns
+    for col in attrs.keys():
+        col_name = f"snapped_{col}"
+        if col_name not in result.columns:
+            result[col_name] = None
+
+    for i, (idx, geom, dist, snapped_flag) in enumerate(
+        zip(candidate_idx, snapped_geoms, distances, flags)
+    ):
         result.at[idx, "geometry"] = geom
         result.at[idx, "snap_distance_m"] = dist
         result.at[idx, "snapped"] = snapped_flag
         result.at[idx, "snap_rule"] = label if snapped_flag else "exceeded_threshold"
+
+        for col, values_list in attrs.items():
+            result.at[idx, f"snapped_{col}"] = values_list[i]
 
     snapped = sum(flags)
     exceeded = len(flags) - snapped

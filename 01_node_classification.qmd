@@ -480,6 +480,7 @@ gdf_nodes_snapped = snap_nodes(
     node_mask=pure_fwy_mask,
     max_distance_m=500,
     label="Freeway_Mainline",
+    target_id_cols=["DOT_RTNAME", "DOT_RTPART", "DOT_HWYNAM"],
 )
 
 # Pass 2: Snap Junction nodes to Mainline OR Ramp centerlines
@@ -489,6 +490,7 @@ gdf_nodes_snapped = snap_nodes(
     node_mask=fwy_junction_mask,
     max_distance_m=500,
     label="Freeway_Junction",
+    target_id_cols=["DOT_RTNAME", "DOT_RTPART", "DOT_HWYNAM"],
 )
 ```
 
@@ -674,6 +676,7 @@ gdf_nodes_snapped = snap_nodes(
     node_mask=cd_snap_mask,
     max_distance_m=300,
     label="CD",
+    target_id_cols=["DOT_RTNAME", "DOT_RTPART", "DOT_HWYNAM"],
 )
 ```
 
@@ -699,6 +702,7 @@ gdf_nodes_snapped = snap_nodes(
     node_mask=ramp_snap_mask,
     max_distance_m=300,
     label="Ramp",
+    target_id_cols=["DOT_RTNAME", "DOT_RTPART", "DOT_HWYNAM"],
 )
 ```
 
@@ -793,6 +797,7 @@ gdf_nodes_snapped = snap_nodes(
     node_mask=surface_snap_mask,
     max_distance_m=250,
     label="Surface",
+    target_id_cols=["DOT_RTNAME", "DOT_RTPART", "DOT_HWYNAM"],
 )
 ```
 
@@ -868,12 +873,23 @@ FixedTransit nodes snapped to Light Rail (TRAX) and Commuter Rail
 ### Step 4a — Snap Transit Nodes
 
 ```{python}
+# Group twin platforms by station name to create a single centralized anchor
+rail_stops_grouped = []
+for name, group in gdf_rail_stops.groupby("stop_name"):
+    merged_geom = group.geometry.union_all().centroid
+    merged_ids = ",".join(group["stop_id"].astype(str).unique())
+    rail_stops_grouped.append({"stop_name": name, "stop_id": merged_ids, "geometry": merged_geom})
+
+gdf_rail_stops_grouped = gpd.GeoDataFrame(rail_stops_grouped, crs=CRS_UTM)
+
+# Snap using the combined station centroids
 gdf_nodes_snapped = snap_transit(
     gdf_nodes_snapped,
-    gdf_rail_stops,
+    gdf_rail_stops_grouped,
     node_mask=gdf_nodes_snapped["FixedTransit"],
     max_distance_m=200,
     label="FixedTransit_Rail",
+    target_id_cols=["stop_name", "stop_id"],
 )
 ```
 
