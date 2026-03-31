@@ -695,11 +695,19 @@ print(f"  eligible for interchange snap: {cd_ramp_snap_mask.sum():,}")
 # This is essential because a CD model node may sit at a Ramp physical endpoint
 # and a Ramp model node may sit at a CD physical endpoint — the two physical
 # types share endpoints at gore points and must be available together.
+#
+# Tolerance is set tighter than the freeway mainline (100m vs 500m) because:
+# - Ramp and CD nodes should sit very close to their physical endpoints.
+# - A wide tolerance allows snapping across adjacent parallel interchange
+#   segments, pulling nodes onto the wrong ramp or the wrong gore point.
+# - Nodes that fall outside 100m are flagged for manual QGIS review, which
+#   is the correct outcome — they likely indicate a model node drawn at an
+#   abstract position with no nearby physical counterpart.
 gdf_nodes_snapped = snap_nodes(
     gdf_nodes_snapped,
     active_cl[is_interchange],
     node_mask=cd_ramp_snap_mask,
-    max_distance_m=300,
+    max_distance_m=100,
     label="Interchange",
     target_id_cols=["DOT_RTNAME", "DOT_RTPART", "DOT_HWYNAM"],
 )
@@ -712,8 +720,17 @@ snapped = gdf_nodes_snapped[gdf_nodes_snapped["snap_rule"] == "Interchange"]["sn
 print(f"Interchange (CD + Ramp) nodes snapped: {len(snapped):,}")
 print(f"  median move:  {snapped.median():.1f}m")
 print(f"  max move:     {snapped.max():.1f}m")
-print(f"  moved < 50m:  {(snapped < 50).sum():,}  ({(snapped < 50).mean()*100:.0f}%)")
-print(f"  moved 50–300m:{((snapped >= 50) & (snapped <= 300)).sum():,}")
+print(f"  moved < 25m:  {(snapped < 25).sum():,}  ({(snapped < 25).mean()*100:.0f}%)")
+print(f"  moved 25–100m:{((snapped >= 25) & (snapped <= 100)).sum():,}")
+
+# Nodes that failed to snap — these are candidates for manual review in QGIS.
+ic_unsnapped = gdf_nodes_snapped[
+    cd_ramp_snap_mask & (gdf_nodes_snapped["snap_rule"] == "exceeded_threshold")
+]
+print(f"\nInterchange nodes NOT snapped (exceeded 100m threshold): {len(ic_unsnapped):,}")
+print(f"  These likely have no nearby physical Ramp or CD endpoint within 100m.")
+print(f"  Review in QGIS: check if the model node is abstractly placed or if"
+      f" a centerline split is needed.")
 ```
 
 ### Step 2c — Interchange Post-Snap Map

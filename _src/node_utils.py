@@ -146,55 +146,71 @@ def assign_directions(gdf_nodes: gpd.GeoDataFrame, gdf_links: gpd.GeoDataFrame) 
 
 def _assign_line_directions(gdf_lines: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """
-    Extract allowed directions from FULLNAME or DOT_RTNAME for LineStrings.
+    Extract allowed directions from FULLNAME or DOT_RTNAME for LineStrings,
+    then unconditionally clear directions for all Ramp and CD segments.
 
-    Directional enforcement is intentionally disabled for Ramp (DOT_RTNAME[5]
-    == 'R') and CD (DOT_RTNAME[5] == 'C') segments. There are two independent
-    reasons, one per direction source:
+    WHY directions are cleared for interchange segments
+    ---------------------------------------------------
+    A ramp name like "I-215W SB X20 TO SR-201 WB RAMP" encodes TWO directions:
+    the origin corridor (SB) and the destination corridor (WB). These describe
+    the route the ramp takes, not the direction at any specific endpoint. The
+    ramp has two endpoints — one at the SB gore and one at the WB gore — and
+    neither endpoint has a single meaningful direction. Extracting one or both
+    directions from the name would still incorrectly reject nodes at either end
+    (e.g. a NB node at the SB/NB gore).
 
-    FULLNAME source (e.g. "I-215W SB X20 TO SR-201 WB RAMP"):
-        The regex extracts the FIRST directional token, which is the ORIGIN
-        corridor direction ("SB"), not the destination. The physical endpoint
-        being matched is at the WB terminus of the ramp. A WB junction node
-        at that endpoint would receive only a tier-1 grouped match (SB and WB
-        both group to "N") instead of tier-0, causing it to lose in competition
-        to any tier-0 bidder even when it is the physically closest node.
+    Ramps are directional transitions by nature. The correct semantic is that
+    a ramp endpoint accepts any connecting node direction at tier 0. Clearing
+    allowed_dirs to "" achieves exactly that.
 
-    DOT_RTNAME source (LRS P/N character at index 4):
-        The P/N flag encodes the road-database digitising direction, not traffic
-        flow direction. A ramp departing a WB freeway may have LRS direction P
-        (→ allowed_dirs = "NB,EB"), which falsely rejects a WB junction node as
-        incompatible entirely (is_compatible = False).
+    The same applies to CD (Collector-Distributor) segments: their LRS P/N
+    flag encodes digitising direction, not traffic flow, and is unreliable at
+    gore points.
 
-    In both cases the correct fix is the same: clear allowed_dirs to "" for all
-    Ramp and CD segments, making them direction-agnostic. This means any node
-    can match them at tier 0. The overpass-protection that directional filtering
-    provides is only meaningful on through-running mainline segments, where the
-    direction encoding is reliable and consistently describes traffic flow.
+    WHY the clearing must be unconditional and check POSTTYPE
+    ---------------------------------------------------------
+    The clearing was previously inside the `if "DOT_RTNAME" in lines.columns:`
+    block and only checked DOT_RTNAME[5]. This left a gap: local slip ramps and
+    flyovers that lack a full 11-character UDOT LRS name (so DOT_RTNAME[5] is
+    not "R") but are correctly flagged with POSTTYPE == "RAMP" would retain a
+    misleading direction extracted from FULLNAME (e.g. "SB" from "SB RAMP").
+    The clearing now runs as a final unconditional step and checks both columns,
+    matching exactly how is_interchange is defined in the calling notebook.
     """
     lines = gdf_lines.copy()
     lines["allowed_dirs"] = ""
 
+    # Step 1: extract direction from FULLNAME if available.
     if "FULLNAME" in lines.columns:
         extracted = lines["FULLNAME"].astype(str).str.extract(r"\b(NB|SB|EB|WB)\b", expand=False)
         lines["allowed_dirs"] = extracted.fillna("")
 
+    # Step 2: fill remaining blanks from DOT_RTNAME LRS direction character.
     if "DOT_RTNAME" in lines.columns:
         mask_empty = lines["allowed_dirs"] == ""
-        # The 5th character (index 4) is the LRS direction indicator (P or N)
+        # Index 4 (5th character) is the LRS reference direction: P or N.
         lrs_dir = lines.loc[mask_empty, "DOT_RTNAME"].astype(str).str[4:5]
-
-        # P = Positive reference direction (Northbound or Eastbound)
+        # P = Positive (Northbound or Eastbound)
         lines.loc[mask_empty & (lrs_dir == "P"), "allowed_dirs"] = "NB,EB"
-        # N = Negative reference direction (Southbound or Westbound)
+        # N = Negative (Southbound or Westbound)
         lines.loc[mask_empty & (lrs_dir == "N"), "allowed_dirs"] = "SB,WB"
 
-        # Clear directions for all Ramp (R) and CD (C) segments.
-        # This runs unconditionally — it overrides whatever was set by either
-        # the FULLNAME regex or the LRS P/N logic above.
-        # The 6th character (index 5) of DOT_RTNAME identifies the road type.
-        is_interchange = lines["DOT_RTNAME"].astype(str).str[5].isin(["R", "C"])
-        lines.loc[is_interchange, "allowed_dirs"] = ""
+    # Step 3: unconditionally clear directions for all interchange segments.
+    # Must run AFTER steps 1 and 2 to override whatever they assigned.
+    # Checks both DOT_RTNAME[5] (state LRS ramps/CDs) and POSTTYPE (local
+    # ramps that may lack a full LRS name) — mirroring the notebook's
+    # is_interchange = is_ramp | is_cd definition exactly.
+    is_lrs_interchange = pd.Series(False, index=lines.index)
+    is_posttype_ramp = pd.Series(False, index=lines.index)
+
+    if "DOT_RTNAME" in lines.columns:
+        # Index 5 (6th character) identifies road type: R = Ramp, C = CD
+        is_lrs_interchange = lines["DOT_RTNAME"].astype(str).str[5].isin(["R", "C"])
+
+    if "POSTTYPE" in lines.columns:
+        is_posttype_ramp = lines["POSTTYPE"].astype(str).str.strip().str.upper() == "RAMP"
+
+    lines.loc[is_lrs_interchange | is_posttype_ramp, "allowed_dirs"] = ""
 
     return lines
 
