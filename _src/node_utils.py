@@ -146,40 +146,53 @@ def assign_directions(gdf_nodes: gpd.GeoDataFrame, gdf_links: gpd.GeoDataFrame) 
 
 def _assign_line_directions(gdf_lines: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """
-    Extract allowed directions from FULLNAME or DOT_RTNAME for LineStrings.
+    Extract allowed directions from FULLNAME or DOT_RTNAME for LineStrings,
+    and tag ramp segments with an `is_ramp` boolean column.
 
     Direction treatment by segment type
     ------------------------------------
     Mainline (Interstate, Freeway, State Highway):
-        Direction is extracted from FULLNAME (NB/SB/EB/WB keyword) and then
-        from the LRS P/N character if FULLNAME yields nothing. Direction is
-        preserved and enforced — this is what prevents nodes from snapping
-        across overpasses.
+        Direction extracted from FULLNAME (NB/SB/EB/WB token) or LRS P/N.
+        Enforced strictly — prevents nodes from snapping across overpasses.
 
     CD (Collector-Distributor, DOT_RTNAME[5] == 'C'):
-        CD roads run parallel to the mainline for extended distances and have
-        a consistent, reliable travel direction. Their LRS P/N character at
-        index 4 is a valid proxy for that direction. Direction IS preserved for
-        CD segments so that CD nodes snap directionally at tier-0.
-        FULLNAME extraction is skipped for CDs because names like
-        "I-15 CD ROAD" contain no directional token, so LRS P/N is the only
-        available source and should be used directly.
+        LRS P/N is authoritative (parallel to mainline, consistent direction).
+        FULLNAME is skipped — CD names carry no directional token.
 
     Ramp (DOT_RTNAME[5] == 'R' or POSTTYPE == 'RAMP'):
-        A ramp name like "I-215W SB X20 TO SR-201 WB RAMP" encodes the ORIGIN
-        corridor (SB) and DESTINATION corridor (WB) — not the direction at any
-        specific endpoint. The ramp has two endpoints: one at the SB gore and
-        one at the WB gore. Neither has a single meaningful direction.
-        The LRS P/N for a ramp encodes digitising direction (which end connects
-        to the lower milepost of the parent route), not traffic flow.
-        Both sources are therefore misleading for endpoint matching.
-        Directions are CLEARED for all ramp segments — they become
-        direction-agnostic so any connecting node matches at tier-0.
+        The FIRST direction token in FULLNAME identifies the FREEWAY CORRIDOR
+        that the ramp serves — i.e., which physical side of the median it is on.
+        Example: "I-215S EB X11 ON STATE RAMP" → EB = this ramp is on the
+        eastbound side of I-215. "I-215W WB X13 ON REDWOOD RAMP" → WB side.
+
+        This corridor direction is used for SAME-GROUP filtering only.
+        In _spatial_snap, ramp group matches (e.g. WB node ↔ SB-named ramp,
+        both in the N-group) are promoted to tier-0 — not left at tier-1.
+        This allows "I-215W SB X20 TO SR-201 WB RAMP" (SB origin → N group)
+        to match a WB node (N group) at tier-0, while an EB node (P group)
+        is correctly rejected entirely (P ∩ N = ∅).
+
+        LRS P/N is NOT used for ramps — it encodes digitising direction (which
+        end connects to the lower parent-route milepost), not traffic flow, and
+        is unreliable at gore points.
+
+        Ramps with no directional token in FULLNAME (e.g. local slip ramps
+        with a generic name) retain allowed_dirs = "" and remain fully
+        direction-agnostic — safe fallback for undirected local geometry.
+
+    WHY this fixes cross-carriageway snapping
+    ------------------------------------------
+    Previously ramps were fully cleared (allowed_dirs = ""), which let WB nodes
+    snap to EB ramp endpoints (and vice versa). With corridor direction restored:
+        WB node (N-group) + EB ramp (P-group): P ∩ N = ∅ → incompatible ✓
+        WB node (N-group) + WB ramp (N-group): N ∩ N → tier-0 (group) ✓
+        WB node (N-group) + SB ramp (N-group): N ∩ N → tier-0 (group) ✓
     """
     lines = gdf_lines.copy()
     lines["allowed_dirs"] = ""
+    lines["is_ramp"] = False
 
-    # Identify ramp and CD segments up front — used to branch logic below.
+    # Identify segment types up front.
     is_lrs_ramp = pd.Series(False, index=lines.index)
     is_lrs_cd = pd.Series(False, index=lines.index)
     is_posttype_ramp = pd.Series(False, index=lines.index)
@@ -192,35 +205,31 @@ def _assign_line_directions(gdf_lines: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     if "POSTTYPE" in lines.columns:
         is_posttype_ramp = lines["POSTTYPE"].astype(str).str.strip().str.upper() == "RAMP"
 
-    is_any_ramp = is_lrs_ramp | is_posttype_ramp  # all ramp geometry, regardless of source
-    is_any_cd = is_lrs_cd  # CD is LRS-only; no POSTTYPE equivalent
+    is_any_ramp = is_lrs_ramp | is_posttype_ramp
+    is_any_cd = is_lrs_cd
 
-    # Step 1: Extract direction from FULLNAME for non-ramp segments only.
-    # Ramps are excluded here because their FULLNAME direction describes the
-    # origin corridor, not the endpoint. CDs are also excluded because their
-    # FULLNAME ("I-15 CD ROAD") carries no directional token — LRS P/N is better.
+    # Tag ramp segments — consumed by _spatial_snap to promote group matches.
+    lines.loc[is_any_ramp, "is_ramp"] = True
+
+    # Step 1: Extract direction from FULLNAME.
+    #   - Mainlines and ramps: use FULLNAME first direction token.
+    #   - CDs: skipped (no directional token in CD names; LRS P/N used instead).
     if "FULLNAME" in lines.columns:
-        non_interchange = ~is_any_ramp & ~is_any_cd
+        non_cd = ~is_any_cd
         extracted = (
-            lines.loc[non_interchange, "FULLNAME"]
+            lines.loc[non_cd, "FULLNAME"]
             .astype(str)
             .str.extract(r"\b(NB|SB|EB|WB)\b", expand=False)
         )
-        lines.loc[non_interchange, "allowed_dirs"] = extracted.fillna("")
+        lines.loc[non_cd, "allowed_dirs"] = extracted.fillna("")
 
-    # Step 2: Fill remaining blanks (and all CD segments) from LRS P/N character.
-    # CDs are explicitly included here even if they already have a value from Step 1
-    # (they won't, since Step 1 excluded them) — this is the authoritative source for CDs.
+    # Step 2: Fill blanks from LRS P/N for mainlines and CDs only.
+    #   Ramps are excluded — their LRS P/N is digitising direction, not flow.
     if "DOT_RTNAME" in lines.columns:
-        mask_lrs = (lines["allowed_dirs"] == "") | is_any_cd
+        mask_lrs = ((lines["allowed_dirs"] == "") | is_any_cd) & ~is_any_ramp
         lrs_dir = lines.loc[mask_lrs, "DOT_RTNAME"].astype(str).str[4:5]
         lines.loc[mask_lrs & (lrs_dir == "P"), "allowed_dirs"] = "NB,EB"
         lines.loc[mask_lrs & (lrs_dir == "N"), "allowed_dirs"] = "SB,WB"
-
-    # Step 3: Unconditionally clear directions for ALL ramp segments.
-    # This runs last to guarantee it overrides anything Steps 1-2 may have set.
-    # CD segments are intentionally NOT cleared here — their LRS P/N is valid.
-    lines.loc[is_any_ramp, "allowed_dirs"] = ""
 
     return lines
 
@@ -297,6 +306,14 @@ def _spatial_snap(
     tree = STRtree(target_geoms_proj)
     DIR_GROUP = {"NB": "P", "EB": "P", "P": "P", "SB": "N", "WB": "N", "N": "N"}
 
+    # Extract is_ramp flag per target segment.
+    # Ramps use corridor-direction for group filtering only — their group match
+    # is promoted to tier-0 in Phase 2 to handle same-group ramp transitions
+    # (e.g. WB node at SB-origin ramp terminus, both in N-group).
+    is_ramp_target = np.zeros(len(targets_proj), dtype=bool)
+    if is_lines and "is_ramp" in targets_proj.columns:
+        is_ramp_target = targets_proj["is_ramp"].values.astype(bool)
+
     # ==========================================
     # PHASE 1: Bulk Spatial Query & Pre-Compute Direction Sets
     # ==========================================
@@ -345,12 +362,23 @@ def _spatial_snap(
         if has_dirs:
             n_exact, n_grp = node_dirs_exact[n_idx], node_dirs_grp[n_idx]
             t_exact, t_grp = target_dirs_exact[t_idx], target_dirs_grp[t_idx]
+            t_is_ramp = bool(is_ramp_target[t_idx])
             if t_exact and n_exact:
                 if n_exact.intersection(t_exact):
+                    # Exact direction match — tier-0 for all segment types.
                     match_tier = 0
                 elif n_grp.intersection(t_grp):
-                    match_tier = 1
+                    # Grouped direction match (same P/N family, different cardinal).
+                    # For RAMPS: promote to tier-0. The ramp's FULLNAME direction
+                    # identifies its freeway corridor (which side of the median).
+                    # Nodes in the same group (e.g. WB node at SB-origin ramp,
+                    # both N-group) are a valid match — they're on the same side.
+                    # For MAINLINES/CDs: keep tier-1 (overpass protection — a WB
+                    # mainline node should prefer WB segments over SB segments).
+                    match_tier = 0 if t_is_ramp else 1
                 else:
+                    # Groups don't intersect — completely opposite side of freeway.
+                    # Reject entirely: WB node cannot snap to EB ramp endpoint.
                     is_compatible = False
 
         if is_compatible:

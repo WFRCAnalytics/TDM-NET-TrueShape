@@ -383,18 +383,25 @@ coverage is adequate and the threshold is sensible.
 # Centerline type filters — defined once, reused across ALL snap steps.
 # ---------------------------------------------------------------------------
 # 1. Mainline: Filter by authoritative UDOT Route Numbers (first 4 chars of DOT_RTNAME)
-FREEWAY_ROUTES = ["0015", "0080", "0215", "0177", "0067", "0084", "0154", "0089", "0201"]
+FREEWAY_ROUTES = ["0015", "0067", "0080", "0084", "0089", "0092", "0154", "0177", "0201", "0215"]
 is_mainline = active_cl["DOT_RTNAME"].str[:4].isin(FREEWAY_ROUTES)
 
+# 0015: Interstate 15
+# 0067: Legacy Parkway
+# 0080: Interstate 80
+# 0084: Interstate 84
+# 0089: US-89
+# 0092: Timpanogas Highway
+# 0154: Bangerter Highway
+# 0177: West Davis Corridor
+# 0201: SR-201
+# 0215: Interstate 215
+
 # --- OLD APPROACH (Preserved for reference/fallback) ---
-# This rescues SR-201 which has a garbage "()" POSTTYPE but correct DOT_FCLASS.
 # is_mainline = active_cl["DOT_FCLASS"].isin(["Interstate", "Other Freeway"]) | (
 #     active_cl["POSTTYPE"] == "FWY"
 # )
 
-is_mainline = active_cl["DOT_FCLASS"].isin(["Interstate", "Other Freeway"]) | (
-    active_cl["POSTTYPE"] == "FWY"
-)
 # 2. Ramp: official UDOT Ramp (LRS 6th char 'R') OR locally tagged as RAMP.
 is_ramp = (active_cl["DOT_RTNAME"].str[5] == "R") | (active_cl["POSTTYPE"] == "RAMP")
 # 3. CD (Collector-Distributor): LRS 6th char 'C'.
