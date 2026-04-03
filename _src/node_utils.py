@@ -519,7 +519,16 @@ def _spatial_snap(
             id_pt = (round(target_geoms_proj[t_idx].x, 3), round(target_geoms_proj[t_idx].y, 3))
             if dist_pt <= max_distance_m:
                 all_candidates.append(
-                    (match_tier, dist_target, dist_pt, n_idx, id_pt, orig_pt, t_idx, None)
+                    (
+                        0,
+                        dist_target,
+                        dist_pt,
+                        n_idx,
+                        id_pt,
+                        orig_pt,
+                        t_idx,
+                        None,
+                    )  # Hardcoded Tier 0
                 )
 
     # ==========================================
