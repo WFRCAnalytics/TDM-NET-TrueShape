@@ -759,7 +759,10 @@ def snap_nodes(
         Must have ep_allowed_dirs, is_freeway, is_interchange, is_surface.
     node_mask : pd.Series
         Boolean mask selecting which nodes to attempt snapping.
-        Only nodes with snap_rule == "none" are actually attempted.
+        Nodes with snap_rule == "none" or "exceeded_threshold" are attempted,
+        allowing nodes that failed an earlier pass (e.g. interchange-only nodes
+        that found no target in Pass (c)) to fall through to subsequent passes
+        (e.g. Surface) without being permanently locked out.
     max_distance_m : float
         Maximum search radius in metres.
     label : str
@@ -784,7 +787,9 @@ def snap_nodes(
         return result
 
     candidate_idx = node_mask[node_mask].index
-    candidate_idx = candidate_idx[result.loc[candidate_idx, "snap_rule"] == "none"]
+    candidate_idx = candidate_idx[
+        result.loc[candidate_idx, "snap_rule"].isin(["none", "exceeded_threshold"])
+    ]
 
     if len(candidate_idx) == 0:
         print(f"  [{label}] No unsnapped candidate nodes — skipping.")

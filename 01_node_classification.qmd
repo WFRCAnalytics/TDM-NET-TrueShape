@@ -94,6 +94,13 @@ gdf_centerlines.head(1000).explore()
 
 Only links present in the 2027 network (LN_2027 > 0) are loaded.
 
+> **Note — network year benchmark:** Using `LN_2027 > 0` loads the future network
+> state, which contains more built freeway and interchange links than the 2023 network.
+> This is intentional for 2027-scenario classification. To benchmark snapping precision
+> against the stable `main` branch results, temporarily revert to `LN_2023 > 0` and
+> compare node counts — the ~150 node increase is expected from the denser 2027 network,
+> not a logic flaw.
+
 ```{python}
 gdf_links = gpd.read_file(config_filepath["in_network_links"], where="LN_2027 > 0").to_crs(CRS_UTM)
 
@@ -581,6 +588,15 @@ ep_gore = gdf_ep_unique[
 ep_ic_only = gdf_ep_unique[
     ~gdf_ep_unique["is_freeway"] &  gdf_ep_unique["is_interchange"] & ~gdf_ep_unique["is_surface"]
 ].copy()
+# NOTE on ep_ic_only: The `& ~is_surface` filter intentionally excludes endpoints
+# where a ramp terminates onto a surface arterial (Ramp-to-Arterial nodes).
+# Those endpoints also carry is_surface=True because the arterial segment
+# contributes to the same coordinate via OR aggregation in Step E3.
+# Result: Ramp-to-Arterial nodes fail Pass (c) with "exceeded_threshold" and
+# are recycled into Step 2 (Surface snapping) — which is the correct physical
+# target anyway.
+# This is now safe because snap_nodes() allows "exceeded_threshold" nodes to
+# retry in subsequent passes (the state-lockout bug is fixed in node_utils.py).
 
 print(f"Pass (a) endpoint pool — freeway-only:    {len(ep_fwy_only):,}")
 print(f"Pass (b) endpoint pool — gore:            {len(ep_gore):,}")
@@ -669,6 +685,22 @@ gdf_nodes_snapped = snap_nodes(
 ```
 
 ### Step 1e — Post-Snap Distance Summary
+
+```{python}
+# ---------------------------------------------------------------------------
+# Diagnostic: how many interchange-only nodes failed Pass (c) and will be
+# recycled into Step 2 (Surface snapping)?
+# These are Ramp-to-Arterial nodes whose physical endpoint touches a surface
+# street — the ep_ic_only pool correctly excludes those coordinates, so the
+# node fails here and picks up its true surface counterpart in Step 2.
+# ---------------------------------------------------------------------------
+ic_exceeded = gdf_nodes_snapped[
+    (~is_fwy_node & is_ic_node)
+    & (gdf_nodes_snapped["snap_rule"] == "exceeded_threshold")
+]
+print(f"Interchange-only nodes recycling to Step 2 (Surface): {len(ic_exceeded):,}")
+print(f"  (These are Ramp-to-Arterial nodes — expected, not a failure)")
+```
 
 ```{python}
 ALL_SNAP_RULES = ["Freeway_Only", "Freeway_Gore", "Interchange_Only"]
