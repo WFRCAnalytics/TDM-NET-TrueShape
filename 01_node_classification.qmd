@@ -32,10 +32,8 @@ from _src.node_utils import (
     nodes_on,
     count_links,
     assign_node_directions,
-    assign_node_type,
     extract_endpoints,
     assign_endpoint_directions,
-    assign_endpoint_type,
     snap_nodes,
     snap_transit,
 )
@@ -46,14 +44,14 @@ from _src.node_utils import (
 ```{python}
 config_filepath = {
     # Input files
-    "in_centerlines": Path("_data/raw/BangerterEdits.gdb.zip"),
-    "in_network_links": Path("_data/raw/WFv1000_MasterNet - Link.gpkg"),
-    "in_network_nodes": Path("_data/raw/WFv1000_MasterNet - Node.gpkg"),
-    "in_gtfs": Path("_data/raw/uta_gtfs.zip"),
+    "in_centerlines":      Path("_data/raw/BangerterEdits.gdb.zip"),
+    "in_network_links":    Path("_data/raw/WFv1000_MasterNet - Link.gpkg"),
+    "in_network_nodes":    Path("_data/raw/WFv1000_MasterNet - Node.gpkg"),
+    "in_gtfs":             Path("_data/raw/uta_gtfs.zip"),
     # Output files
     "out_node_classified": Path("_data/processed/nodes_classified.gpkg"),
-    "out_node_snapped": Path("_data/processed/nodes_snapped.gpkg"),
-    "out_debug": Path("_data/processed/debug_snapping.gpkg"),  # DO NOT CHANGE THE DEBUG FILE NAME
+    "out_node_snapped":    Path("_data/processed/nodes_snapped.gpkg"),
+    "out_debug":           Path("_data/processed/debug_snapping.gpkg"),
 }
 ```
 
@@ -165,34 +163,114 @@ gdf_rail_stops.explore()
 
 ### Functional Type
 
-Each flag column is assigned using `nodes_on()` with a pandas query string, or plain
-pandas expressions for N-range conditions. All FT codes reference the 2027 network year.
+Each flag column is assigned using `nodes_on()`, which returns `True` for any
+node whose N value appears as endpoint A or B of at least one link matching
+the query. All FT codes reference the 2027 network year. Flags are
+non-exclusive — a node touching both a freeway and a ramp link will be `True`
+for both `Freeway` and `Ramp`.
 
 ```{python}
 # ---------------------------------------------------------------------------
-# Freeway FT codes (2027):
-#   20–27, 30–36 = freeway mainline family
-#   Exclude: 21, 31 (CD), 37, 38 (HOV), 39 (ManagedAccess)
+# ORIGIN NODE PROCESSING — Functional type flags from network link FT codes
+#
+# Classification authority: FT_2027 column on network links.
+# A node inherits a flag if ANY of its connected links carries that FT code.
+# The FT code taxonomy below is the WFRC MasterNet standard for 2027.
+#
+# FT code reference table
+# -----------------------
+#  FT   Label              Notes
+#  ---  -----------------  ---------------------------------------------------
+#   1   CentroidConnector  Artificial link connecting TAZ centroid to network.
+#   2   PrincipalArterial  Highest-order surface arterial (e.g. major state highways).
+#   3   MinorArterial      Second-order surface arterial.
+#   4   MajorCollector     Collector serving significant traffic movement.
+#   5   MinorCollector     Collector primarily serving local access.
+#   6   Local              Local street; not coded for model assignment.
+#   7   LocalUnclassified  Local street, unverified classification.
+#  12   Expressway         Divided, limited-access (not fully controlled).
+#  13   ExpresswayRamp     Ramp connecting to an Expressway segment.
+#  14   ExpresswayParkway  Parkway-class expressway (lower speed).
+#  15   ExpresswayDivided  Divided expressway variant.
+#  20   FreewayUrban       Urban fully-controlled freeway.
+#  21   CD                 Collector-distributor alongside freeway.
+#  22   FreewayRural       Rural fully-controlled freeway.
+#  23   FreewayFrontage    Frontage / service road adjacent to freeway.
+#  24   FreewayHOV         Freeway HOV/express lane (mainline speed).
+#  25   FreewayDirectional Directional freeway link (e.g. reversed peak lane).
+#  26   FreewayConnector   Short freeway-to-freeway connector.
+#  27   FreewayHighSpeed   High-speed freeway variant.
+#  28   OnRamp             On-ramp to freeway or expressway.
+#  29   OffRamp            Off-ramp from freeway or expressway.
+#  30   FreewayRuralCD     Rural freeway collector-distributor.
+#  31   RuralCD            Rural collector-distributor.
+#  32–36                   Rural freeway variants (mirror 22–26 for rural).
+#  37   HOVRamp            Ramp accessing an HOV or managed lane.
+#  38   HOVConnector       Connector within an HOV corridor.
+#  39   ManagedAccess      HOT / managed lane (tolled express lane).
+#  41   ExpresswayOnRamp   On-ramp specific to an Expressway.
+#  42   ExpresswayOffRamp  Off-ramp specific to an Expressway.
+#  70   LightRail          TRAX light rail link.
+#  80   CommuterRail       FrontRunner commuter rail link.
 # ---------------------------------------------------------------------------
+
+# Freeway mainline family: FT 20–27 and 30–36, minus the CD and HOV variants.
+# CD (21, 31) and HOV (37, 38) are excluded here and flagged separately below
+# because they are physically distinct from mainline and require different
+# snapping targets.
 FW = list((set(range(20, 28)) | set(range(30, 37))) - {21, 31})
 
-gdf_nodes["Freeway"]          = nodes_on(gdf_nodes, gdf_links, f"FT_2027 in {FW}")
-gdf_nodes["CD"]               = nodes_on(gdf_nodes, gdf_links, "FT_2027 in [21, 31]")
-gdf_nodes["HOV"]              = nodes_on(gdf_nodes, gdf_links, "FT_2027 in [37, 38]")
-gdf_nodes["ManagedAccess"]    = nodes_on(gdf_nodes, gdf_links, "FT_2027 == 39")
-gdf_nodes["Expressway"]       = nodes_on(gdf_nodes, gdf_links, "FT_2027 in [12, 13, 14, 15]")
-gdf_nodes["Arterial"]         = nodes_on(gdf_nodes, gdf_links, "FT_2027 in [2, 3]")
-gdf_nodes["Collector"]        = nodes_on(gdf_nodes, gdf_links, "FT_2027 in [4, 5]")
-gdf_nodes["Local"]            = nodes_on(gdf_nodes, gdf_links, "FT_2027 in [6, 7]")
-gdf_nodes["Ramp"]             = nodes_on(gdf_nodes, gdf_links, "FT_2027 in [28, 29, 41, 42]")
-gdf_nodes["CentroidConnector"]= nodes_on(gdf_nodes, gdf_links, "FT_2027 == 1")
-gdf_nodes["CentroidNode"]     = gdf_nodes["N"] <= 3_600        # TAZ N: 1–3600
-gdf_nodes["ExternalNode"]     = gdf_nodes["N"].between(3_601, 9_999)
-gdf_nodes["ConnectorOnly"]    = (
-    gdf_nodes["CentroidConnector"]
-    & ~gdf_nodes["CentroidNode"]
-    & ~gdf_nodes["ExternalNode"]
+# --- Freeway and freeway-adjacent ---
+gdf_nodes["Freeway"] = nodes_on(gdf_nodes, gdf_links, f"FT_2027 in {FW}")
+# CD: collector-distributor roads running parallel to the mainline.
+# Merged with Ramp for snapping (both are interchange geometry) but flagged
+# separately here so ConnectorOnly and other derived masks remain correct.
+gdf_nodes["CD"] = nodes_on(gdf_nodes, gdf_links, "FT_2027 in [21, 31]")
+# HOV: managed express lanes. Excluded from is_fwy_node (no physical mainline
+# endpoint) but retained as a flag for reporting and future HOV snap pass.
+gdf_nodes["HOV"] = nodes_on(gdf_nodes, gdf_links, "FT_2027 in [37, 38]")
+# ManagedAccess: HOT / tolled express lanes. Also excluded from is_fwy_node
+# — HOT lane geometry does not coincide with mainline endpoints.
+gdf_nodes["ManagedAccess"] = nodes_on(gdf_nodes, gdf_links, "FT_2027 == 39")
+
+# --- Limited-access surface (expressways) ---
+# Expressways are divided and limited-access but not fully controlled.
+# They are NOT included in FW and will snap to surface endpoints, which is
+# correct for the Wasatch Front network (e.g. Redwood Rd elevated sections).
+gdf_nodes["Expressway"] = nodes_on(gdf_nodes, gdf_links, "FT_2027 in [12, 13, 14, 15]")
+
+# --- Surface street hierarchy ---
+gdf_nodes["Arterial"] = nodes_on(gdf_nodes, gdf_links, "FT_2027 in [2, 3]")
+gdf_nodes["Collector"] = nodes_on(gdf_nodes, gdf_links, "FT_2027 in [4, 5]")
+gdf_nodes["Local"] = nodes_on(gdf_nodes, gdf_links, "FT_2027 in [6, 7]")
+
+# --- Ramps (freeway and expressway) ---
+# FT 28/29: freeway on/off ramps.
+# FT 41/42: expressway on/off ramps.
+# Both are merged into Ramp because they share physical geometry with
+# interchange centerline segments (DOT_RTNAME[5] == "R") and snap to the
+# same endpoint pool. If you need to separate freeway ramps from expressway
+# ramps for reporting, add a FreewayRamp / ExpresswayRamp split here.
+gdf_nodes["Ramp"] = nodes_on(gdf_nodes, gdf_links, "FT_2027 in [28, 29, 41, 42]")
+
+# --- Centroid / external / connector nodes ---
+# CentroidConnector: artificial link (FT 1) between TAZ centroid and network.
+gdf_nodes["CentroidConnector"] = nodes_on(gdf_nodes, gdf_links, "FT_2027 == 1")
+# CentroidNode: TAZ centroid nodes. N range 1–3600 matches WFRC TAZ numbering.
+gdf_nodes["CentroidNode"] = gdf_nodes["N"] <= 3_600
+# ExternalNode: gateway nodes at study-area boundary. N range 3601–9999.
+gdf_nodes["ExternalNode"] = gdf_nodes["N"].between(3_601, 9_999)
+# ConnectorOnly: internal nodes touched only by centroid connectors.
+# These are loading points, not physical intersections — excluded from snapping.
+gdf_nodes["ConnectorOnly"] = (
+    gdf_nodes["CentroidConnector"] & ~gdf_nodes["CentroidNode"] & ~gdf_nodes["ExternalNode"]
 )
+
+# --- Fixed transit ---
+# FT 70 = Light Rail (TRAX), FT 80 = Commuter Rail (FrontRunner).
+# N ranges identify purpose-built transit nodes that have no road geometry:
+#   10000–19999: TRAX / light rail station nodes.
+#   50000–59999: FrontRunner / commuter rail station nodes.
 gdf_nodes["FixedTransit"] = (
     nodes_on(gdf_nodes, gdf_links, "FT_2027 in [70, 80]")
     | gdf_nodes["N"].between(10_000, 19_999)
@@ -233,18 +311,47 @@ endpoint and are excluded from all snapping passes.
 gdf_nodes = count_links(gdf_nodes, gdf_links)
 gdf_nodes = assign_node_directions(gdf_nodes, gdf_links, freeway_ft_codes=FW)
 
-# Assign topology type label — used by snap_nodes for type-tier matching.
-# Three non-exclusive boolean masks compose into five mutually-exclusive labels:
-#   fwy     : freeway mainline only
-#   gore    : freeway + ramp/CD (physical junction between mainline and ramp)
-#   ramp    : ramp/CD only (no freeway, no surface)
-#   ramp_sf : ramp/CD + surface street (ramp-to-arterial terminal)
-#   surface : surface street only (default for all others)
-no_pseudo   = gdf_nodes["LinkCount"] != 2
-is_fwy_node = gdf_nodes["Freeway"] & ~gdf_nodes["ManagedAccess"] & no_pseudo
-is_ramp_node = (gdf_nodes["Ramp"] | gdf_nodes["CD"]) & no_pseudo
-is_surface_node = (gdf_nodes["Arterial"] | gdf_nodes["Collector"] | gdf_nodes["Local"])
-gdf_nodes = assign_node_type(gdf_nodes, is_fwy_node, is_ramp_node, is_surface_node)
+# ---------------------------------------------------------------------------
+# Node topology type — five mutually-exclusive labels built from three
+# non-exclusive boolean masks. Priority cascade: freeway > ramp > surface.
+#
+# Masks
+# -----
+# no_pseudo    : LinkCount != 2  — exclude shape vertices (abstract geometry
+#                handles with no physical endpoint counterpart).
+# is_fwy_node  : touches ≥1 freeway mainline link (FT in FW family).
+#                ManagedAccess excluded — HOT lanes have no mainline endpoint.
+# is_ramp_node : touches ≥1 ramp or CD link.
+# is_surface_node : touches ≥1 surface street link (Arterial / Collector / Local).
+#
+# Labels
+# ------
+# "fwy"     : is_fwy_node  &  ~is_ramp_node
+#             Pure freeway mainline node — no ramp geometry nearby.
+# "gore"    : is_fwy_node  &   is_ramp_node
+#             Physical junction between mainline and ramp/CD geometry.
+# "ramp"    : ~is_fwy_node &   is_ramp_node  &  ~is_surface_node
+#             Mid-ramp node — no freeway and no surface street contact.
+# "ramp_sf" : ~is_fwy_node &   is_ramp_node  &   is_surface_node
+#             Ramp-to-arterial terminal — where an off-ramp meets a surface road.
+# "surface" : all others (including ~is_fwy_node & ~is_ramp_node)
+#             Surface street intersection.
+# ---------------------------------------------------------------------------
+no_pseudo       = gdf_nodes["LinkCount"] != 2
+is_fwy_node     = gdf_nodes["Freeway"] & ~gdf_nodes["ManagedAccess"] & no_pseudo
+is_ramp_node    = (gdf_nodes["Ramp"] | gdf_nodes["CD"]) & no_pseudo
+is_surface_node = gdf_nodes["Arterial"] | gdf_nodes["Collector"] | gdf_nodes["Local"]
+
+gdf_nodes["node_type"] = np.where(
+    is_fwy_node  & ~is_ramp_node,                    "fwy",
+np.where(
+    is_fwy_node  &  is_ramp_node,                    "gore",
+np.where(
+    ~is_fwy_node &  is_ramp_node & ~is_surface_node, "ramp",
+np.where(
+    ~is_fwy_node &  is_ramp_node &  is_surface_node, "ramp_sf",
+                                                     "surface"
+))))
 
 print("Node type distribution:")
 print(gdf_nodes["node_type"].value_counts().rename("count").to_frame())
@@ -373,53 +480,119 @@ inspectable in QGIS before any snapping happens.
 
 ### Step E1 — Classify Centerline Segments
 
-Assign `is_freeway`, `is_interchange`, `is_surface` boolean flags to each active
-centerline segment. These are used by `extract_endpoints` to tag each raw endpoint
-record with the type of its source segment.
+Each active centerline segment gets three non-exclusive boolean flags:
+`is_freeway`, `is_interchange`, `is_surface`. These flow downstream into
+every endpoint pool and type-tier decision, so their definitions are the
+single most important place to audit when snapping results look wrong.
+
+The classification authority here is the **UDOT LRS route name**
+(`DOT_RTNAME`), not `DOT_FCLASS`. `DOT_FCLASS` is inconsistently coded
+across data vintages; `DOT_RTNAME` is the authoritative UDOT identifier
+and its character positions have stable, documented semantics:
+
+```
+DOT_RTNAME layout (11 characters, zero-padded):
+  [0:4]  Route number          e.g. "0015" = I-15, "0154" = Bangerter
+  [4]    LRS direction char    "P" = primary (NB/EB), "N" = negative (SB/WB)
+  [5]    Facility type char    " " = mainline, "R" = ramp, "C" = collector-distributor
+  [6:]   Sequence / suffix     varies
+```
 
 ```{python}
 # ---------------------------------------------------------------------------
-# Authoritative freeway identification by UDOT route number (DOT_RTNAME[:4]).
-# This is more reliable than DOT_FCLASS which can be inconsistently coded.
+# TARGET ENDPOINT PROCESSING — Step E1: Segment-level topology classification
 #
-#   0015: Interstate 15       0080: Interstate 80
-#   0067: Legacy Parkway      0084: Interstate 84
-#   0089: US-89               0092: Timpanogos Highway
-#   0154: Bangerter Highway   0177: West Davis Corridor
-#   0201: SR-201              0215: Interstate 215
+# Freeway route numbers (DOT_RTNAME[:4])
+# ---------------------------------------
+# These are the controlled-access corridors in the Wasatch Front study area.
+# Only segments whose route number appears in this list AND whose facility
+# type character (DOT_RTNAME[5]) is NOT "R" or "C" are classified as freeway
+# mainline. Adding or removing a route here is the primary tuning lever for
+# freeway coverage — e.g. add "0071" if SR-71 is built, remove "0089" if
+# US-89 should be treated as surface for a given scenario.
 # ---------------------------------------------------------------------------
 FREEWAY_ROUTES = [
-    "0015", "0067", "0080", "0084", "0089",
-    "0092", "0154", "0177", "0201", "0215",
+    "0015",   # Interstate 15         (primary N-S spine)
+    "0067",   # Legacy Parkway        (limited-access, no ramps)
+    "0080",   # Interstate 80         (E-W, SLC to Parley's Canyon)
+    "0084",   # Interstate 84         (Ogden corridor)
+    "0089",   # US-89                 (surface in places — watch for misclassification)
+    "0092",   # Timpanogos Highway    (SR-92, American Fork Canyon access)
+    "0154",   # Bangerter Highway     (semi-controlled ring road)
+    "0177",   # West Davis Corridor   (new build, limited segments in data)
+    "0201",   # SR-201                (W. Valley connector)
+    "0215",   # Interstate 215        (belt route, SLC)
 ]
 
-# is_freeway: mainline segments only — excludes ramps (R) and CDs (C)
-# DOT_RTNAME[5] distinguishes mainline (space or other) from ramp (R) or CD (C)
+# ---------------------------------------------------------------------------
+# is_freeway : mainline segments of the above corridors only.
+#
+# Condition 1 — route number in FREEWAY_ROUTES (DOT_RTNAME[:4])
+#   Identifies the corridor.
+# Condition 2 — DOT_RTNAME[5] is NOT "R" (ramp)
+#   Ramp segments share the parent route number but have "R" in position 5.
+#   Without this exclusion, on-ramps and off-ramps would be mis-tagged as
+#   freeway mainline, inflating the is_freeway pool and corrupting gore detection.
+# Condition 3 — DOT_RTNAME[5] is NOT "C" (collector-distributor)
+#   CD segments also carry the parent route number. They function like ramps
+#   for snapping purposes (node FT 31 = CD) so must be excluded from mainline.
+# ---------------------------------------------------------------------------
 active_cl["is_freeway"] = (
-    active_cl["DOT_RTNAME"].str[:4].isin(FREEWAY_ROUTES)
-    & ~(active_cl["DOT_RTNAME"].str[5] == "R")
-    & ~(active_cl["DOT_RTNAME"].str[5] == "C")
+    active_cl["DOT_RTNAME"].str[:4].isin(FREEWAY_ROUTES)   # on a freeway corridor
+    & ~(active_cl["DOT_RTNAME"].str[5] == "R")              # not a ramp
+    & ~(active_cl["DOT_RTNAME"].str[5] == "C")              # not a CD
 )
 
-# is_interchange: ramp or CD segments — Ramp and CD are treated as a single
-# interchange class throughout. A model node with FT 31 (CD) regularly sits
-# at a physical ramp endpoint and vice versa — the distinction is unreliable
-# in both network and centerline attributes.
-#   LRS 6th char 'R' = official UDOT ramp
-#   LRS 6th char 'C' = collector-distributor
-#   POSTTYPE == 'RAMP' = local slip ramps without a full 11-char LRS name
+# ---------------------------------------------------------------------------
+# is_interchange : ramp and CD segments.
+#
+# Ramp (DOT_RTNAME[5] == "R")
+#   Official UDOT ramp segments — on/off ramps, loop ramps, directional ramps.
+#   These carry the parent freeway route number with "R" in position 5.
+# Collector-distributor (DOT_RTNAME[5] == "C")
+#   CD road segments. In the network, FT 21/31 (CD) nodes regularly sit at
+#   physical ramp endpoints and vice versa — the FT distinction between ramp
+#   and CD is unreliable, so they are merged into one interchange class here.
+# POSTTYPE == "RAMP" (local slip ramps)
+#   Short local ramps and freeway-frontage connectors that do NOT have a
+#   full 11-character UDOT LRS name. Their POSTTYPE field is coded "RAMP"
+#   by the GIS source. Without this clause, these segments fall through to
+#   is_surface and their endpoints pollute the surface pool.
+#
+# Note: is_interchange is non-exclusive with is_freeway intentionally — a
+# segment at a gore point may carry both flags (e.g. a very short connector
+# between a mainline spur and a ramp). The OR-aggregation in Step E3 then
+# correctly tags that endpoint coordinate as both is_freeway and is_interchange,
+# producing ep_type = "gore".
+# ---------------------------------------------------------------------------
 active_cl["is_interchange"] = (
-    (active_cl["DOT_RTNAME"].str[5] == "R")
-    | (active_cl["DOT_RTNAME"].str[5] == "C")
-    | (active_cl["POSTTYPE"].astype(str).str.strip().str.upper() == "RAMP")
+    (active_cl["DOT_RTNAME"].str[5] == "R")                                    # official ramp
+    | (active_cl["DOT_RTNAME"].str[5] == "C")                                  # collector-distributor
+    | (active_cl["POSTTYPE"].astype(str).str.strip().str.upper() == "RAMP")    # local slip ramp
 )
 
-# is_surface: everything else — state highways, arterials, collectors, locals
+# ---------------------------------------------------------------------------
+# is_surface : everything that is neither freeway mainline nor interchange.
+#
+# This is a residual category — it catches state highways, arterials,
+# collectors, locals, and any freeway-adjacent segments that do not meet
+# the mainline or ramp criteria above.
+#
+# Tuning note: US-89 (route "0089") is included in FREEWAY_ROUTES but has
+# many at-grade segments. Those segments will be is_surface here because
+# they lack the controlled-access DOT_RTNAME structure. This is correct
+# behaviour — their endpoints should land in the surface pool, not the
+# freeway pool. If you see US-89 surface nodes snapping to freeway endpoints,
+# check whether any US-89 segments are being mis-classified as is_freeway.
+# ---------------------------------------------------------------------------
 active_cl["is_surface"] = ~active_cl["is_freeway"] & ~active_cl["is_interchange"]
 
-print(f"Freeway segments:      {active_cl['is_freeway'].sum():,}")
-print(f"Interchange segments:  {active_cl['is_interchange'].sum():,}")
-print(f"Surface segments:      {active_cl['is_surface'].sum():,}")
+print("Target centerline segment classification:")
+print(f"  is_freeway    (mainline):    {active_cl['is_freeway'].sum():,}")
+print(f"  is_interchange (ramp / CD): {active_cl['is_interchange'].sum():,}")
+print(f"  is_surface    (all others): {active_cl['is_surface'].sum():,}")
+print(f"  both fwy + ic (gore segs):  {(active_cl['is_freeway'] & active_cl['is_interchange']).sum():,}")
+print(f"  total active segments:      {len(active_cl):,}")
 ```
 
 ### Step E2 — Extract Raw Endpoints
@@ -476,9 +649,51 @@ aggregating direction from all contributing raw segments with freeway-first prio
 ```{python}
 gdf_ep_unique = assign_endpoint_directions(gdf_ep_unique, gdf_ep_raw)
 
-# Assign endpoint topology type label — used by snap_nodes for type-tier matching.
-# Derived from the three boolean flags via priority cascade (see assign_endpoint_type).
-gdf_ep_unique = assign_endpoint_type(gdf_ep_unique)
+# ---------------------------------------------------------------------------
+# Endpoint topology type — six mutually-exclusive labels built from the three
+# boolean flags aggregated in Step E3. Priority cascade: freeway > interchange
+# > surface. Mirrors the node_type logic so that type-tier matching can compare
+# like with like across the two datasets.
+#
+# Flags (from Step E3 OR-aggregation per unique coordinate)
+# ----------------------------------------------------------
+# is_freeway    : ≥1 freeway mainline segment terminates here.
+# is_interchange: ≥1 ramp or CD segment terminates here.
+# is_surface    : ≥1 surface street segment terminates here.
+#
+# Labels
+# ------
+# "gore"    : is_freeway  &  is_interchange
+#             Mainline/ramp junction — both a freeway and a ramp end here.
+#             Checked first: a point where fwy AND ramp meet is always gore.
+# "fwy_sf"  : is_freeway  &  is_surface  (& ~is_interchange, after gore)
+#             At-grade freeway/surface crossing or frontage road junction.
+#             Physically at a surface intersection despite freeway proximity.
+# "fwy"     : is_freeway  &  ~is_interchange  &  ~is_surface
+#             Pure freeway mainline endpoint — no ramp or surface contact.
+# "ramp_sf" : ~is_freeway &   is_interchange  &   is_surface
+#             Ramp-to-arterial terminal — where an off-ramp meets a surface road.
+# "ramp"    : ~is_freeway &   is_interchange  &  ~is_surface
+#             Mid-ramp endpoint — no freeway, no surface street contact.
+# "surface" : ~is_freeway &  ~is_interchange  (is_surface implied)
+#             Pure surface street endpoint.
+# ---------------------------------------------------------------------------
+fw = gdf_ep_unique["is_freeway"].values
+ic = gdf_ep_unique["is_interchange"].values
+sf = gdf_ep_unique["is_surface"].values
+
+gdf_ep_unique["ep_type"] = np.where(
+     fw &  ic,              "gore",
+np.where(
+     fw &  sf,              "fwy_sf",
+np.where(
+     fw & ~ic & ~sf,        "fwy",
+np.where(
+    ~fw &  ic &  sf,        "ramp_sf",
+np.where(
+    ~fw &  ic & ~sf,        "ramp",
+                            "surface"
+)))))
 
 print(f"Endpoints with direction assigned: {(gdf_ep_unique['ep_allowed_dirs'] != '').sum():,}")
 print(f"Endpoints direction-agnostic:      {(gdf_ep_unique['ep_allowed_dirs'] == '').sum():,}")
@@ -509,13 +724,12 @@ print(f"Endpoint layer exported to: {debug_path} → layer='endpoint_layer'")
 
 ### Step 1a — Build Node Snap Masks
 
-The `node_type` column assigned above drives type-tier matching inside
-`snap_nodes`. The boolean masks below select which nodes enter each pass —
-they alias the same logic used in `assign_node_type`.
+The `node_type` column built above drives type-tier matching inside `snap_nodes`.
+The boolean masks below select which nodes enter each pass — they reuse the masks
+defined in the classification block above.
 
 ```{python}
-# no_pseudo, is_fwy_node, is_ramp_node, is_surface_node were computed above
-# alongside assign_node_type. Aliased here for pass-mask readability.
+# no_pseudo, is_fwy_node, is_ramp_node, is_surface_node defined above.
 # is_ramp_node replaces the old is_ic_node — same mask, consistent naming.
 is_ic_node = is_ramp_node   # alias kept for backward compat with Step 1b/1c code
 
