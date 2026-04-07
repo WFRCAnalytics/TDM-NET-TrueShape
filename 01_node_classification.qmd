@@ -159,7 +159,7 @@ gdf_rail_stops.explore()
 
 ---
 
-## Node Classification
+## Origin Processing (Network Nodes)
 
 ### Functional Type
 
@@ -179,39 +179,44 @@ for both `Freeway` and `Ramp`.
 #
 # FT code reference table
 # -----------------------
-#  FT   Label              Notes
-#  ---  -----------------  ---------------------------------------------------
-#   1   CentroidConnector  Artificial link connecting TAZ centroid to network.
-#   2   PrincipalArterial  Highest-order surface arterial (e.g. major state highways).
-#   3   MinorArterial      Second-order surface arterial.
-#   4   MajorCollector     Collector serving significant traffic movement.
-#   5   MinorCollector     Collector primarily serving local access.
-#   6   Local              Local street; not coded for model assignment.
-#   7   LocalUnclassified  Local street, unverified classification.
-#  12   Expressway         Divided, limited-access (not fully controlled).
-#  13   ExpresswayRamp     Ramp connecting to an Expressway segment.
-#  14   ExpresswayParkway  Parkway-class expressway (lower speed).
-#  15   ExpresswayDivided  Divided expressway variant.
-#  20   FreewayUrban       Urban fully-controlled freeway.
-#  21   CD                 Collector-distributor alongside freeway.
-#  22   FreewayRural       Rural fully-controlled freeway.
-#  23   FreewayFrontage    Frontage / service road adjacent to freeway.
-#  24   FreewayHOV         Freeway HOV/express lane (mainline speed).
-#  25   FreewayDirectional Directional freeway link (e.g. reversed peak lane).
-#  26   FreewayConnector   Short freeway-to-freeway connector.
-#  27   FreewayHighSpeed   High-speed freeway variant.
-#  28   OnRamp             On-ramp to freeway or expressway.
-#  29   OffRamp            Off-ramp from freeway or expressway.
-#  30   FreewayRuralCD     Rural freeway collector-distributor.
-#  31   RuralCD            Rural collector-distributor.
-#  32–36                   Rural freeway variants (mirror 22–26 for rural).
-#  37   HOVRamp            Ramp accessing an HOV or managed lane.
-#  38   HOVConnector       Connector within an HOV corridor.
-#  39   ManagedAccess      HOT / managed lane (tolled express lane).
-#  41   ExpresswayOnRamp   On-ramp specific to an Expressway.
-#  42   ExpresswayOffRamp  Off-ramp specific to an Expressway.
-#  70   LightRail          TRAX light rail link.
-#  80   CommuterRail       FrontRunner commuter rail link.
+#  FT    Label              Notes
+#  ---   -----------------  ---------------------------------------------------
+#   1    CentroidConnector  Artificial link connecting TAZ centroid to network.
+#   2    PrincipalArterial  Highest-order surface arterial.
+#   3    MinorArterial      Second-order surface arterial.
+#   4    MajorCollector     Collector serving significant traffic movement.
+#   5    MinorCollector     Collector primarily serving local access.
+#   6    Local              Local street.
+#   7    Unpaved            Unpaved or unverified local street.
+#  12    Expressway         Expressway, posted 60-70 mph.
+#  13    Expressway         Expressway, posted 55-65 mph.
+#  14    Expressway         Expressway, posted 50-60 mph.
+#  15    Expressway         Expressway, posted 45-55 mph.
+#  20    MMLoopRamp         MM: fwy-to-fwy loop ramp.
+#  21    MMCDRoad           MM: C-D road, flyover ramp.
+#  22    MMFwy              MM: posted 55-60 mph.
+#  23    MMFwy              MM: posted 65 mph, no aux lane.
+#  24    MMFwy              MM: posted 65 mph, aux lane.
+#  25    MMFwy              MM: posted 75 mph, no aux lane.
+#  26    MMFwy              MM: posted 75 mph, aux lane.
+#  27    Placeholder        Place holder.
+#  28    MMOnRamp           MM: On-ramp.
+#  29    MMOffRamp          MM: Off-ramp.
+#  30    FwyLoopRamp        Fwy: fwy-to-fwy loop ramp.
+#  31    FwyCDRoad          Fwy: C-D road, flyover ramp.
+#  32    Fwy                Fwy: posted 55-60 mph.
+#  33    Fwy                Fwy: posted 65 mph, no aux lane.
+#  34    Fwy                Fwy: posted 65 mph, aux lane.
+#  35    Fwy                Fwy: posted 75 mph, no aux lane.
+#  36    Fwy                Fwy: posted 75 mph, aux lane.
+#  37    FwyHOV             Fwy: HOV lane.
+#  38    FwyManaged         Fwy: Managed lane.
+#  39    FwyManagedAccess   Fwy: Managed lane access.
+#  40    FwyTollway         Fwy: Tollway.
+#  41    FwyOnRamp          Fwy: On-ramp.
+#  42    FwyOffRamp         Fwy: Off-ramp.
+#  70    LightRail          TRAX light rail link.
+#  80    CommuterRail       FrontRunner commuter rail link.
 # ---------------------------------------------------------------------------
 
 # Freeway mainline family: FT 20–27 and 30–36, minus the CD and HOV variants.
@@ -470,7 +475,7 @@ print(f"Active centerlines: {len(active_cl):,} of {len(gdf_centerlines):,}")
 
 ---
 
-## Step E — Build Centerline Endpoint Layer
+## Target Processing (Centerline Endpoints)
 
 The endpoint layer is the foundation of the new snapping approach. Instead of
 snapping directly to centerline segments (and extracting endpoints inside the
@@ -478,7 +483,7 @@ algorithm), we pre-classify every unique endpoint coordinate by what types of
 segments meet there. This makes topology and direction assignments explicit and
 inspectable in QGIS before any snapping happens.
 
-### Step E1 — Classify Centerline Segments
+### Classify Centerline Segments
 
 Each active centerline segment gets three non-exclusive boolean flags:
 `is_freeway`, `is_interchange`, `is_surface`. These flow downstream into
@@ -595,7 +600,7 @@ print(f"  both fwy + ic (gore segs):  {(active_cl['is_freeway'] & active_cl['is_
 print(f"  total active segments:      {len(active_cl):,}")
 ```
 
-### Step E2 — Extract Raw Endpoints
+### Extract Raw Endpoints
 
 `extract_endpoints` pulls the start and end coordinate of every segment as a flat
 point GeoDataFrame. Each row carries the source segment's type flags and key
@@ -608,7 +613,7 @@ print(f"Raw endpoint records: {len(gdf_ep_raw):,}")
 print(f"  (≈2× the number of segments — one start, one end per segment)")
 ```
 
-### Step E3 — Deduplicate by Coordinate
+### Deduplicate by Coordinate
 
 Group raw endpoints by rounded XY coordinate (millimetre precision). For each
 unique location, aggregate the type flags from all contributing segments using OR —
@@ -616,14 +621,10 @@ a coordinate is tagged `is_freeway=True` if any freeway segment terminates there
 
 ```{python}
 # Aggregate topology flags per unique coordinate
-ep_agg = (
-    gdf_ep_raw
-    .groupby(["x_round", "y_round"], as_index=False)
-    .agg(
-        is_freeway    =("is_freeway",    "any"),
-        is_interchange=("is_interchange","any"),
-        is_surface    =("is_surface",    "any"),
-    )
+ep_agg = gdf_ep_raw.groupby(["x_round", "y_round"], as_index=False).agg(
+    is_freeway=("is_freeway", "any"),
+    is_interchange=("is_interchange", "any"),
+    is_surface=("is_surface", "any"),
 )
 
 # Reconstruct geometry from rounded coordinates
@@ -631,9 +632,15 @@ ep_agg["geometry"] = gpd.points_from_xy(ep_agg["x_round"], ep_agg["y_round"])
 gdf_ep_unique = gpd.GeoDataFrame(ep_agg, crs=CRS_UTM)
 
 print(f"Unique endpoints: {len(gdf_ep_unique):,}")
-print(f"  is_freeway only (pass a targets):     {(gdf_ep_unique['is_freeway'] & ~gdf_ep_unique['is_interchange']).sum():,}")
-print(f"  is_freeway + is_interchange (gore):   {(gdf_ep_unique['is_freeway'] &  gdf_ep_unique['is_interchange']).sum():,}")
-print(f"  is_interchange only (pass c targets): {(~gdf_ep_unique['is_freeway'] & gdf_ep_unique['is_interchange'] & ~gdf_ep_unique['is_surface']).sum():,}")
+print(
+    f"  is_freeway only (pass a targets):     {(gdf_ep_unique['is_freeway'] & ~gdf_ep_unique['is_interchange']).sum():,}"
+)
+print(
+    f"  is_freeway + is_interchange (gore):   {(gdf_ep_unique['is_freeway'] & gdf_ep_unique['is_interchange']).sum():,}"
+)
+print(
+    f"  is_interchange only (pass c targets): {(~gdf_ep_unique['is_freeway'] & gdf_ep_unique['is_interchange'] & ~gdf_ep_unique['is_surface']).sum():,}"
+)
 print(f"  is_surface:                           {gdf_ep_unique['is_surface'].sum():,}")
 ```
 
@@ -948,12 +955,12 @@ if len(exceeded) > 0:
 ### Step 1f — Post-Snap Validation Map
 
 ```{python}
-#| eval: false
+# | eval: false
 
 fwy_snapped = gdf_nodes_snapped[gdf_nodes_snapped["snap_rule"].isin(ALL_SNAP_RULES)]
 fwy_original = gdf_nodes.loc[fwy_snapped.index]
 
-fwy_snapped_wgs  = fwy_snapped.to_crs(CRS_WGS)
+fwy_snapped_wgs = fwy_snapped.to_crs(CRS_WGS)
 fwy_original_wgs = fwy_original.to_crs(CRS_WGS)
 
 connectors = []
@@ -961,11 +968,13 @@ for idx in fwy_snapped.index:
     orig = fwy_original_wgs.geometry.loc[idx]
     snap = fwy_snapped_wgs.geometry.loc[idx]
     if orig.distance(snap) > 0:
-        connectors.append({
-            "geometry": LineString([orig, snap]),
-            "N": int(fwy_snapped.loc[idx, "N"]),
-            "dist_m": float(fwy_snapped.loc[idx, "snap_distance_m"]),
-        })
+        connectors.append(
+            {
+                "geometry": LineString([orig, snap]),
+                "N": int(fwy_snapped.loc[idx, "N"]),
+                "dist_m": float(fwy_snapped.loc[idx, "snap_distance_m"]),
+            }
+        )
 gdf_fwy_connectors = gpd.GeoDataFrame(connectors, crs=CRS_WGS)
 
 center = [fwy_original_wgs.geometry.y.mean(), fwy_original_wgs.geometry.x.mean()]
@@ -975,7 +984,9 @@ conn_layer = folium.FeatureGroup(name="Displacement lines", show=True)
 for _, row in gdf_fwy_connectors.iterrows():
     folium.PolyLine(
         [(c[1], c[0]) for c in row.geometry.coords],
-        color="#888780", weight=1, opacity=0.7,
+        color="#888780",
+        weight=1,
+        opacity=0.7,
         tooltip=f"N: {row['N']} | moved {row['dist_m']}m",
     ).add_to(conn_layer)
 conn_layer.add_to(m_post_fwy)
@@ -983,24 +994,25 @@ conn_layer.add_to(m_post_fwy)
 orig_layer = folium.FeatureGroup(name="Original positions", show=True)
 for idx, row in fwy_original_wgs.iterrows():
     folium.CircleMarker(
-        location=[row.geometry.y, row.geometry.x], radius=4,
-        color="#E24B4A", fill=True, fill_opacity=0.8,
+        location=[row.geometry.y, row.geometry.x],
+        radius=4,
+        color="#E24B4A",
+        fill=True,
+        fill_opacity=0.8,
         tooltip=f"N: {gdf_nodes.loc[idx, 'N']} (original)",
     ).add_to(orig_layer)
 orig_layer.add_to(m_post_fwy)
 
-RULE_COLORS = {
-    "Freeway_Only":       "#1D9E75",
-    "Freeway_Gore":       "#534AB7",
-    "Interchange_Only":   "#EF9F27",
-}
+RULE_COLORS = {"Freeway_Only": "#1D9E75", "Freeway_Gore": "#534AB7", "Interchange_Only": "#EF9F27"}
 snap_layer = folium.FeatureGroup(name="Snapped positions", show=True)
 for idx, row in fwy_snapped_wgs.iterrows():
     rule = fwy_snapped.loc[idx, "snap_rule"]
     folium.CircleMarker(
-        location=[row.geometry.y, row.geometry.x], radius=4,
+        location=[row.geometry.y, row.geometry.x],
+        radius=4,
         color=RULE_COLORS.get(rule, "#888780"),
-        fill=True, fill_opacity=0.8,
+        fill=True,
+        fill_opacity=0.8,
         tooltip=f"N: {int(fwy_snapped.loc[idx, 'N'])} | {rule} | {fwy_snapped.loc[idx, 'snap_distance_m']}m",
     ).add_to(snap_layer)
 snap_layer.add_to(m_post_fwy)
@@ -1177,7 +1189,7 @@ stops only — bus stops are excluded. Twin platforms merged to station centroid
 rail_stops_grouped = []
 for name, group in gdf_rail_stops.groupby("stop_name"):
     merged_geom = group.geometry.union_all().centroid
-    merged_ids  = ",".join(group["stop_id"].astype(str).unique())
+    merged_ids = ",".join(group["stop_id"].astype(str).unique())
     rail_stops_grouped.append({"stop_name": name, "stop_id": merged_ids, "geometry": merged_geom})
 
 gdf_rail_stops_grouped = gpd.GeoDataFrame(rail_stops_grouped, crs=CRS_UTM)
