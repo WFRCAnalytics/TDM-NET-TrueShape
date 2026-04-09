@@ -343,6 +343,7 @@ _TYPE_TIER: dict[tuple[str, str], int] = {
     ("ramp", "gore"): 1,
     ("ramp", "ramp_sf"): 1,
     ("ramp_sf", "ramp_sf"): 0,
+    ("ramp_sf", "gore"): 1,    # ramp terminal at a freeway/ramp junction — physically adjacent
     ("ramp_sf", "surface"): 1,
     ("ramp_sf", "ramp"): 1,
     ("surface", "surface"): 0,

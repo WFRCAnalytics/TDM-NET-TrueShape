@@ -155,11 +155,11 @@ in the topology cascade (§A3).
 #   12-15  Expressway (limited-access, divided, no full interchange control)
 #   22-26  MM freeway (posted 55-75 mph, MM series)
 #   32-36  Freeway    (posted 55-75 mph, Fwy series)
-#   30     FwyLoopRamp / 20 MMLoopRamp — fwy-to-fwy connectors with mainline geometry
 #   Note: 21 (MM CD road) and 31 (Fwy CD road) are excluded — they are
 #         physically collector-distributor geometry, not mainline.
 #
 # Ramp / CD (RAMP_CODES):
+#   30     FwyLoopRamp / 20 MMLoopRamp — fwy-to-fwy connectors with mainline geometry
 #   28/29  MM on/off ramps  |  41/42  Fwy on/off ramps
 #   21/31  CD roads (merged with ramps — FT distinction is unreliable in practice)
 #
@@ -175,19 +175,19 @@ in the topology cascade (§A3).
 #   N ranges 10000-19999 and 50000-59999: purpose-built station nodes with no road geometry.
 # ─────────────────────────────────────────────────────────────────────────
 
-FW_CODES      = set(range(22, 27)) | set(range(32, 37)) | {12, 13, 14, 15, 20, 30}
-RAMP_CODES    = {28, 29, 41, 42, 21, 31}
+FW_CODES = set(range(22, 27)) | set(range(32, 37)) | {12, 13, 14, 15}
+RAMP_CODES = {28, 29, 41, 42, 21, 31, 20, 30}
 SURFACE_CODES = {2, 3, 4, 5, 6, 7}
-HOV_CODES     = {37, 38, 39}
+HOV_CODES = {37, 38, 39}
 
-gdf_nodes["Freeway"]      = nodes_on(gdf_nodes, gdf_links, FW_CODES)
-gdf_nodes["Ramp"]         = nodes_on(gdf_nodes, gdf_links, RAMP_CODES)
-gdf_nodes["Surface"]      = nodes_on(gdf_nodes, gdf_links, SURFACE_CODES)
-gdf_nodes["HOV"]          = nodes_on(gdf_nodes, gdf_links, HOV_CODES)
+gdf_nodes["Freeway"] = nodes_on(gdf_nodes, gdf_links, FW_CODES)
+gdf_nodes["Ramp"] = nodes_on(gdf_nodes, gdf_links, RAMP_CODES)
+gdf_nodes["Surface"] = nodes_on(gdf_nodes, gdf_links, SURFACE_CODES)
+gdf_nodes["HOV"] = nodes_on(gdf_nodes, gdf_links, HOV_CODES)
 gdf_nodes["FixedTransit"] = (
     nodes_on(gdf_nodes, gdf_links, {70, 80})
-    | gdf_nodes["N"].between(10_000, 19_999)   # TRAX station nodes
-    | gdf_nodes["N"].between(50_000, 59_999)   # FrontRunner station nodes
+    | gdf_nodes["N"].between(10_000, 19_999)  # TRAX station nodes
+    | gdf_nodes["N"].between(50_000, 59_999)  # FrontRunner station nodes
 )
 
 flag_cols = ["Freeway", "Ramp", "Surface", "HOV", "FixedTransit"]
@@ -575,10 +575,10 @@ print(f"Pass (c) endpoint pool — ramp + ramp_sf: {len(ep_ic_only):,}")
 
 # ── Node masks ────────────────────────────────────────────────────────────
 print()
-print(f"Pass (a) nodes — freeway-only: {(is_fwy_node & ~is_ramp_node).sum():,}")
-print(f"Pass (b) nodes — gore:         {(is_fwy_node &  is_ramp_node).sum():,}")
-print(f"Pass (c) nodes — ramp-only:    {(~is_fwy_node & is_ramp_node).sum():,}")
-print(f"  of which ramp+surface:       {(~is_fwy_node & is_ramp_node & is_surface_node).sum():,}")
+print(f"Pass (a)  nodes — freeway-only: {(is_fwy_node & ~is_ramp_node).sum():,}")
+print(f"Pass (b)  nodes — gore:         {(is_fwy_node &  is_ramp_node).sum():,}")
+print(f"Pass (c)  nodes — pure ramp:    {(~is_fwy_node & is_ramp_node & ~is_surface_node).sum():,}")
+print(f"  ramp_sf nodes → surface pass: {(~is_fwy_node & is_ramp_node &  is_surface_node).sum():,}")
 ```
 
 ```{python}
@@ -613,40 +613,45 @@ gdf_nodes_snapped = gdf_nodes.copy()
 #   Direction: link_directions (freeway-priority cascade).
 #   Threshold: 500m (freeway geometry can sit well off the model centroid).
 gdf_nodes_snapped = snap_nodes(
-    gdf_nodes_snapped, ep_fwy_only,
-    node_mask      = is_fwy_node & ~is_ramp_node,
-    max_distance_m = 500,
-    label          = "Freeway_Only",
-    direction_col  = "link_directions",
-    target_id_cols = ["x_round", "y_round"],
+    gdf_nodes_snapped,
+    ep_fwy_only,
+    node_mask=is_fwy_node & ~is_ramp_node,
+    max_distance_m=500,
+    label="Freeway_Only",
+    direction_col="link_directions",
+    target_id_cols=["x_round", "y_round"],
 )
 
 # Pass (b) — Gore nodes → gore endpoint pool
 #   Type tier: gore ep = Tier 0,  fwy/fwy_sf/ramp ep = Tier 1.
 #   Direction: fw_directions (freeway side of the mixed node only —
 #              isolates mainline direction, ignoring ramp/CD link directions).
-#   Threshold: 250m.
+#   Threshold: 500m.
 gdf_nodes_snapped = snap_nodes(
-    gdf_nodes_snapped, ep_gore,
-    node_mask      = is_fwy_node & is_ramp_node,
-    max_distance_m = 250,
-    label          = "Freeway_Gore",
-    direction_col  = "fw_directions",
-    target_id_cols = ["x_round", "y_round"],
+    gdf_nodes_snapped,
+    ep_gore,
+    node_mask=is_fwy_node & is_ramp_node,
+    max_distance_m=500,
+    label="Freeway_Gore",
+    direction_col="fw_directions",
+    target_id_cols=["x_round", "y_round"],
 )
 
-# Pass (c) — Ramp/interchange nodes → ramp + ramp_sf endpoint pool
-#   Type tier: ramp ep = Tier 0 for ramp nodes, ramp_sf ep = Tier 0 for ramp_sf nodes.
+# Pass (c) — Pure ramp nodes (mid-ramp, no surface contact) → ramp endpoint pool
 #   Direction: ic_fw_directions (inherited one hop from adjacent freeway — see Part C).
-#   Threshold: 100m (ramp terminals are physically close).
-#   ramp_sf nodes that exceed 100m are recycled into Step D3 (Surface, Tier-1).
+#   Pure ramp nodes have no surface links so link_directions is unreliable;
+#   the freeway-neighbor direction is the best available signal.
+#   Threshold: 100m (mid-ramp nodes sit close to physical endpoints).
+#   ramp_sf nodes (ramp + surface) are intentionally excluded here — they route
+#   directly to the surface pass (D2) which uses link_directions and a wider threshold.
 gdf_nodes_snapped = snap_nodes(
-    gdf_nodes_snapped, ep_ic_only,
-    node_mask      = ~is_fwy_node & is_ramp_node,
-    max_distance_m = 100,
-    label          = "Interchange_Only",
-    direction_col  = "ic_fw_directions",
-    target_id_cols = ["x_round", "y_round"],
+    gdf_nodes_snapped,
+    ep_ic_only,
+    node_mask=~is_fwy_node & is_ramp_node & ~is_surface_node,
+    max_distance_m=100,
+    label="Interchange_Only",
+    direction_col="ic_fw_directions",
+    target_id_cols=["x_round", "y_round"],
 )
 ```
 
@@ -770,20 +775,26 @@ print(f"  unsnapped_nodes:    {len(fwy_unsnapped):,}")
 ### D2 — Surface Snapping
 
 Arterial, Collector, and Local nodes snap to surface street endpoints.
-`ramp_sf` nodes recycled from pass (c) also land here — surface ep is Tier-1 for them.
+`ramp_sf` nodes also land here (intentionally skipped in pass c) — their
+`link_directions` cardinals from surface links are the reliable direction signal,
+and `gore` endpoints are included in the pool since ramp-to-arterial terminals
+can physically sit at freeway/ramp junctions.
 
 ```{python}
-# Surface pool: surface, ramp_sf, and fwy_sf endpoints.
-# fwy_sf endpoints (freeway+surface junctions) are Tier-0 for surface-only nodes
-# because they physically sit at surface intersections.
-ep_surface = gdf_ep_unique[gdf_ep_unique["ep_type"].isin(["surface", "ramp_sf", "fwy_sf"])].copy()
+# Surface pool: surface, ramp_sf, fwy_sf, and gore endpoints.
+# gore included because ramp_sf nodes (ramp terminal at arterial) can be co-located
+# with a gore point where a freeway and ramp both terminate at grade.
+ep_surface = gdf_ep_unique[gdf_ep_unique["ep_type"].isin(["surface", "ramp_sf", "fwy_sf", "gore"])].copy()
 print(f"Surface endpoint pool: {len(ep_surface):,}")
 print(f"  surface-only: {(gdf_ep_unique['ep_type'] == 'surface').sum():,}")
 print(f"  ramp+surface: {(gdf_ep_unique['ep_type'] == 'ramp_sf').sum():,}")
 print(f"  fwy+surface:  {(gdf_ep_unique['ep_type'] == 'fwy_sf').sum():,}")
+print(f"  gore:         {(gdf_ep_unique['ep_type'] == 'gore').sum():,}")
 ```
 
 ```{python}
+# surface_mask includes ramp_sf nodes (Ramp & Surface, not already snapped)
+# so they receive a first-call-wins attempt here with the correct direction col.
 surface_mask = (
     (gdf_nodes_snapped["Surface"])
     & (gdf_nodes_snapped["LinkCount"] != 2)
@@ -793,7 +804,7 @@ print(f"Surface nodes eligible: {surface_mask.sum():,}")
 gdf_nodes_snapped = snap_nodes(
     gdf_nodes_snapped, ep_surface,
     node_mask      = surface_mask,
-    max_distance_m = 250,
+    max_distance_m = 400,   # wider than pass (c) — ramp_sf terminals can be displaced
     label          = "Surface",
     direction_col  = "link_directions",
     target_id_cols = ["x_round", "y_round"],
