@@ -83,7 +83,7 @@ county_filter = "(" + ", ".join(f"'{f}'" for f in COUNTY_FIPS) + ")"
 gdf_centerlines = gpd.read_file(
     gdb_path,  # f"/vsizip/{PATHS['in_centerlines']}",
     layer="TestNetwork20260410",
-    where=f"(DOT_FCLASS IN ('Interstate', 'Local', 'Major Collector', 'Minor Arterial', 'Minor Collector', 'Other Freeway', 'Principal Arterial') OR DOT_RTNAME LIKE '%R%' Or DOT_RTNAME LIKE '%C%') AND CARTOCODE <> '99' AND (COUNTY_L IN {county_filter} OR COUNTY_R IN {county_filter})",
+    where=f"(DOT_FCLASS IN ('Interstate', 'Local', 'Major Collector', 'Minor Arterial', 'Minor Collector', 'Other Freeway', 'Principal Arterial') OR DOT_RTNAME LIKE '%R%' OR DOT_RTNAME LIKE '%C%') AND CARTOCODE <> '99' AND (COUNTY_L IN {county_filter} OR COUNTY_R IN {county_filter})",
 ).to_crs(CRS_UTM)
 
 # Strip trailing whitespace from categorical fields (source-data artefact)
