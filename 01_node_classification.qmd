@@ -39,8 +39,6 @@ from _src.node_utils import (
     assign_endpoint_directions,
     snap_nodes,
     snap_transit,
-    ep_claimed_coords,
-    filter_ep_claimed,
 )
 ```
 
@@ -801,16 +799,13 @@ _claimed: frozenset = frozenset()
 #   Type tier: fwy ep = Tier-0 | gore/fwy_sf ep = Tier-1.
 #   Direction: link_directions (freeway-priority cascade).
 #   Threshold: 500m (model centroids can sit well off the physical carriageway).
-gdf_nodes_snapped = snap_nodes(
-    gdf_nodes_snapped,
-    filter_ep_claimed(ep_fwy_only, _claimed),
+gdf_nodes_snapped, _claimed = snap_nodes(
+    gdf_nodes_snapped, ep_fwy_only,
     node_mask=is_fwy_node & ~is_ramp_node & ~is_surface_node & ~is_transit_node,
-    max_distance_m=500,
-    label="Freeway_Only",
-    direction_col="link_directions",
-    target_id_cols=["x_round", "y_round"],
+    max_distance_m=500, label="Freeway_Only",
+    direction_col="link_directions", target_id_cols=["x_round", "y_round"],
+    excluded_ep_coords=_claimed,
 )
-_claimed = ep_claimed_coords(gdf_nodes_snapped)
 
 # Pass (a2) — fwy_sf nodes (fwy+surface, no ramp) → fwy_sf endpoint pool
 #   At-grade freeway crossings: the node touches a freeway AND a surface street.
@@ -819,16 +814,13 @@ _claimed = ep_claimed_coords(gdf_nodes_snapped)
 #   surface endpoints are available as a graceful fallback.
 #   Direction: link_directions (freeway component provides the cardinal signal).
 #   Threshold: 500m.
-gdf_nodes_snapped = snap_nodes(
-    gdf_nodes_snapped,
-    filter_ep_claimed(ep_fwy_sf, _claimed),
+gdf_nodes_snapped, _claimed = snap_nodes(
+    gdf_nodes_snapped, ep_fwy_sf,
     node_mask=is_fwy_node & ~is_ramp_node & is_surface_node & ~is_transit_node,
-    max_distance_m=500,
-    label="Freeway_Surface",
-    direction_col="link_directions",
-    target_id_cols=["x_round", "y_round"],
+    max_distance_m=500, label="Freeway_Surface",
+    direction_col="link_directions", target_id_cols=["x_round", "y_round"],
+    excluded_ep_coords=_claimed,
 )
-_claimed = ep_claimed_coords(gdf_nodes_snapped)
 
 # Pass (b) — gore + gore_sf nodes → gore endpoint pool
 #   gore:    fwy+ramp, no surface — classic elevated junction.
@@ -840,16 +832,13 @@ _claimed = ep_claimed_coords(gdf_nodes_snapped)
 #   Direction: fw_directions (freeway-only majority-vote, isolates mainline
 #              direction from the ramp/CD signal at the same node).
 #   Threshold: 500m.
-gdf_nodes_snapped = snap_nodes(
-    gdf_nodes_snapped,
-    filter_ep_claimed(ep_gore, _claimed),
+gdf_nodes_snapped, _claimed = snap_nodes(
+    gdf_nodes_snapped, ep_gore,
     node_mask=is_fwy_node & is_ramp_node & ~is_transit_node,
-    max_distance_m=500,
-    label="Freeway_Gore",
-    direction_col="fw_directions",
-    target_id_cols=["x_round", "y_round"],
+    max_distance_m=500, label="Freeway_Gore",
+    direction_col="fw_directions", target_id_cols=["x_round", "y_round"],
+    excluded_ep_coords=_claimed,
 )
-_claimed = ep_claimed_coords(gdf_nodes_snapped)
 
 # Pass (c) — ramp nodes (mid-ramp only, no surface) → ramp endpoint pool
 #   Direction: ic_fw_directions (inherited one hop from adjacent freeway — see Part C).
@@ -858,16 +847,13 @@ _claimed = ep_claimed_coords(gdf_nodes_snapped)
 #   Threshold: 100m (mid-ramp nodes sit close to physical endpoints).
 #   fwy_sf and ramp_sf nodes are intentionally excluded — both have surface links
 #   and route to the surface pass (D2) where their at-grade topology is Tier-0.
-gdf_nodes_snapped = snap_nodes(
-    gdf_nodes_snapped,
-    filter_ep_claimed(ep_ic_only, _claimed),
+gdf_nodes_snapped, _claimed = snap_nodes(
+    gdf_nodes_snapped, ep_ic_only,
     node_mask=~is_fwy_node & is_ramp_node & ~is_surface_node & ~is_transit_node,
-    max_distance_m=100,
-    label="Interchange_Only",
-    direction_col="ic_fw_directions",
-    target_id_cols=["x_round", "y_round"],
+    max_distance_m=100, label="Interchange_Only",
+    direction_col="ic_fw_directions", target_id_cols=["x_round", "y_round"],
+    excluded_ep_coords=_claimed,
 )
-_claimed = ep_claimed_coords(gdf_nodes_snapped)
 ```
 
 ### D1 Summary
@@ -1008,13 +994,14 @@ print(f"  fwy_sf (fallback):{(surface_mask & _unsnapped & (gdf_nodes_snapped['no
 print(f"  gore_sf (fallback):{(surface_mask & _unsnapped & (gdf_nodes_snapped['node_type'] == 'gore_sf')).sum():,}")
 print(f"  surface:          {(surface_mask & _unsnapped & (gdf_nodes_snapped['node_type'] == 'surface')).sum():,}")
 
-gdf_nodes_snapped = snap_nodes(
-    gdf_nodes_snapped, filter_ep_claimed(ep_surface, _claimed),
+gdf_nodes_snapped, _claimed = snap_nodes(
+    gdf_nodes_snapped, ep_surface,
     node_mask      = surface_mask,
     max_distance_m = 400,   # wider than pass (c) — ramp_sf terminals can be displaced
     label          = "Surface",
     direction_col  = "link_directions",
     target_id_cols = ["x_round", "y_round"],
+    excluded_ep_coords = _claimed,
 )
 ```
 

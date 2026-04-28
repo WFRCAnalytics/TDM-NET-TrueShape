@@ -22,22 +22,17 @@ Public API
     assign_node_directions(gdf_nodes, gdf_links, freeway_ft_codes) -> GeoDataFrame
         Append link_directions and fw_directions columns.
 
-    assign_node_type(gdf_nodes, is_fwy_mask, is_ramp_mask, is_surface_mask) -> GeoDataFrame
-        Append node_type column — one of:
-        "fwy" | "fwy_sf" | "gore" | "gore_sf" | "ramp" | "ramp_sf" | "surface".
-
-    extract_endpoints(gdf_centerlines) -> GeoDataFrame
-        Vectorised extraction of segment start/end points with topology flags.
-
     assign_endpoint_directions(gdf_ep_unique, gdf_ep_raw) -> GeoDataFrame
         Append ep_allowed_dirs direction string per unique endpoint.
 
     assign_endpoint_type(gdf_ep_unique) -> GeoDataFrame
         Append ep_type column — one of: "fwy" | "gore" | "fwy_sf" | "ramp" | "ramp_sf" | "surface".
 
-    snap_nodes(gdf_nodes, gdf_endpoints, node_mask, max_distance_m, label, ...) -> GeoDataFrame
-        Snap a masked subset of nodes to the nearest compatible endpoint
-        using Gale-Shapley stable matching with (type_tier, dir_tier, dist) sorting.
+    snap_nodes(gdf_nodes, gdf_endpoints, node_mask, max_distance_m, label, ...) -> (GeoDataFrame, frozenset)
+        Snap a masked subset of nodes to the nearest compatible endpoint using
+        Gale-Shapley stable matching with (type_tier, dir_tier, dist) sorting.
+        Returns the updated node GeoDataFrame and the cumulative set of claimed
+        endpoint coordinates for passing to the next call via excluded_ep_coords.
 
     snap_transit(gdf_nodes, gdf_stops, node_mask, max_distance_m, ...) -> GeoDataFrame
         Snap transit nodes to nearest GTFS stop (no direction matching).
@@ -696,7 +691,8 @@ def snap_nodes(
     target_id_cols: list[str] = None,
     crs_projected: str = "EPSG:26912",
     node_type_col: str = "node_type",
-) -> gpd.GeoDataFrame:
+    excluded_ep_coords: frozenset = frozenset(),
+) -> tuple[gpd.GeoDataFrame, frozenset]:
     """
     Snap a masked subset of nodes to the nearest compatible endpoint using
     Gale-Shapley stable matching with (type_tier, dir_tier, dist) sorting.
@@ -706,23 +702,31 @@ def snap_nodes(
     are eligible — the latter allows nodes that failed an earlier pass to fall
     through to subsequent passes.
 
+    Returns
+    -------
+    (result, claimed) where result is the updated node GeoDataFrame and claimed
+    is a frozenset of (x_round, y_round) tuples for every endpoint assigned
+    across all passes so far.  Pass claimed as excluded_ep_coords on the next
+    call to prevent two nodes in different passes from landing on the same
+    physical endpoint.
+
     Parameters
     ----------
-    gdf_nodes     : Full node layer. Must have snap_rule, link_directions,
-                    fw_directions, and node_type columns (built by the notebook
-                    before calling this function).
-    gdf_endpoints : Pre-classified endpoint layer (output of Step E in the
-                    notebook) with ep_allowed_dirs, ep_type, is_freeway,
-                    is_interchange, is_surface columns.
-    node_mask     : Boolean Series selecting which nodes to attempt.
-    max_distance_m: Search radius in metres.
-    label         : snap_rule value written for successfully snapped nodes.
-    direction_col : "link_directions" for passes (a)/(c); "fw_directions" for (b).
-    target_id_cols: Columns on gdf_endpoints to propagate to snapped_<col> output.
-    node_type_col : Column containing topology type label. If absent, type-tier
-                    matching is skipped (backward-compatible with transit).
+    gdf_nodes          : Full node layer.
+    gdf_endpoints      : Pre-classified endpoint layer.
+    node_mask          : Boolean Series selecting which nodes to attempt.
+    max_distance_m     : Search radius in metres.
+    label              : snap_rule value written for successfully snapped nodes.
+    direction_col      : "link_directions" for passes (a)/(c); "fw_directions" for (b).
+    target_id_cols     : Columns on gdf_endpoints to propagate to snapped_<col> output.
+    node_type_col      : Column containing topology type label.
+    excluded_ep_coords : Frozenset of (x_round, y_round) already claimed in prior
+                         passes.  Matching endpoint rows are removed before matching
+                         so they cannot be double-assigned.
 
     """
+    gdf_endpoints = filter_ep_claimed(gdf_endpoints, excluded_ep_coords)
+
     result = gdf_nodes.copy()
     if "snap_rule" not in result.columns:
         result["snap_rule"] = "none"
@@ -731,7 +735,7 @@ def snap_nodes(
 
     if len(gdf_endpoints) == 0:
         print(f"  [{label}] No target endpoints — skipping.")
-        return result
+        return result, ep_claimed_coords(result)
 
     candidate_idx = node_mask[node_mask].index
     candidate_idx = candidate_idx[
@@ -739,7 +743,7 @@ def snap_nodes(
     ]
     if len(candidate_idx) == 0:
         print(f"  [{label}] No unsnapped candidate nodes — skipping.")
-        return result
+        return result, ep_claimed_coords(result)
 
     print(
         f"  [{label}] {len(candidate_idx):,} nodes → {len(gdf_endpoints):,} endpoints"
@@ -772,7 +776,7 @@ def snap_nodes(
     snapped = sum(flags)
     exceeded = len(flags) - snapped
     print(f"         → {snapped:,} snapped | {exceeded:,} exceeded {max_distance_m}m threshold")
-    return result
+    return result, ep_claimed_coords(result)
 
 
 def snap_transit(
