@@ -109,6 +109,33 @@ def count_links(gdf_nodes: gpd.GeoDataFrame, gdf_links: gpd.GeoDataFrame) -> gpd
     return result
 
 
+def count_neighbors(gdf_nodes: gpd.GeoDataFrame, gdf_links: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """
+    Append a NeighborCount column to gdf_nodes: how many *distinct* neighboring
+    nodes each node connects to, regardless of link direction.
+
+    Unlike LinkCount, NeighborCount is invariant to whether bidirectional roads
+    are stored as one shared record or two directional records. A pseudonode on
+    a bidirectional road would get LinkCount=4 but NeighborCount=2.
+
+    Note: NeighborCount alone is not sufficient for pseudonode detection. A node
+    at a functional class boundary (e.g. freeway-to-surface transition) also has
+    NeighborCount=2 but is a real junction. Pair with a link-class homogeneity
+    check in the calling notebook — see A2 in 01_node_classification.qmd.
+    """
+    result = gdf_nodes.copy()
+    pairs = pd.concat(
+        [
+            gdf_links[["A", "B"]].rename(columns={"A": "node", "B": "neighbor"}),
+            gdf_links[["B", "A"]].rename(columns={"B": "node", "A": "neighbor"}),
+        ],
+        ignore_index=True,
+    )
+    neighbor_counts = pairs.groupby("node")["neighbor"].nunique()
+    result["NeighborCount"] = result["N"].map(neighbor_counts).fillna(0).astype(int)
+    return result
+
+
 def assign_node_directions(
     gdf_nodes: gpd.GeoDataFrame, gdf_links: gpd.GeoDataFrame, freeway_ft_codes: set | list
 ) -> gpd.GeoDataFrame:
