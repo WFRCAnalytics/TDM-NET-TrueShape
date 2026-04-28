@@ -39,6 +39,8 @@ from _src.node_utils import (
     assign_endpoint_directions,
     snap_nodes,
     snap_transit,
+    ep_claimed_coords,
+    filter_ep_claimed,
 )
 ```
 
@@ -787,6 +789,13 @@ print(f"  > 300m: {(pre_dists > 300).sum():,}  ({(pre_dists > 300).mean() * 100:
 ```{python}
 gdf_nodes_snapped = gdf_nodes.copy()
 
+# _claimed: grows across passes — prevents two nodes in different passes from
+# landing on the same physical endpoint.  The Gale-Shapley algorithm ensures
+# uniqueness within a single pass; this set enforces it across passes whose
+# endpoint pools overlap (e.g. gore endpoints appear in both ep_gore and
+# ep_surface).
+_claimed: frozenset = frozenset()
+
 # Pass (a) — fwy nodes → fwy-only endpoint pool
 #   Mask: fwy+ramp+surface combinations excluded — they go to passes (a2), (b), or D2.
 #   Type tier: fwy ep = Tier-0 | gore/fwy_sf ep = Tier-1.
@@ -794,13 +803,14 @@ gdf_nodes_snapped = gdf_nodes.copy()
 #   Threshold: 500m (model centroids can sit well off the physical carriageway).
 gdf_nodes_snapped = snap_nodes(
     gdf_nodes_snapped,
-    ep_fwy_only,
+    filter_ep_claimed(ep_fwy_only, _claimed),
     node_mask=is_fwy_node & ~is_ramp_node & ~is_surface_node & ~is_transit_node,
     max_distance_m=500,
     label="Freeway_Only",
     direction_col="link_directions",
     target_id_cols=["x_round", "y_round"],
 )
+_claimed = ep_claimed_coords(gdf_nodes_snapped)
 
 # Pass (a2) — fwy_sf nodes (fwy+surface, no ramp) → fwy_sf endpoint pool
 #   At-grade freeway crossings: the node touches a freeway AND a surface street.
@@ -811,13 +821,14 @@ gdf_nodes_snapped = snap_nodes(
 #   Threshold: 500m.
 gdf_nodes_snapped = snap_nodes(
     gdf_nodes_snapped,
-    ep_fwy_sf,
+    filter_ep_claimed(ep_fwy_sf, _claimed),
     node_mask=is_fwy_node & ~is_ramp_node & is_surface_node & ~is_transit_node,
     max_distance_m=500,
     label="Freeway_Surface",
     direction_col="link_directions",
     target_id_cols=["x_round", "y_round"],
 )
+_claimed = ep_claimed_coords(gdf_nodes_snapped)
 
 # Pass (b) — gore + gore_sf nodes → gore endpoint pool
 #   gore:    fwy+ramp, no surface — classic elevated junction.
@@ -831,13 +842,14 @@ gdf_nodes_snapped = snap_nodes(
 #   Threshold: 500m.
 gdf_nodes_snapped = snap_nodes(
     gdf_nodes_snapped,
-    ep_gore,
+    filter_ep_claimed(ep_gore, _claimed),
     node_mask=is_fwy_node & is_ramp_node & ~is_transit_node,
     max_distance_m=500,
     label="Freeway_Gore",
     direction_col="fw_directions",
     target_id_cols=["x_round", "y_round"],
 )
+_claimed = ep_claimed_coords(gdf_nodes_snapped)
 
 # Pass (c) — ramp nodes (mid-ramp only, no surface) → ramp endpoint pool
 #   Direction: ic_fw_directions (inherited one hop from adjacent freeway — see Part C).
@@ -848,13 +860,14 @@ gdf_nodes_snapped = snap_nodes(
 #   and route to the surface pass (D2) where their at-grade topology is Tier-0.
 gdf_nodes_snapped = snap_nodes(
     gdf_nodes_snapped,
-    ep_ic_only,
+    filter_ep_claimed(ep_ic_only, _claimed),
     node_mask=~is_fwy_node & is_ramp_node & ~is_surface_node & ~is_transit_node,
     max_distance_m=100,
     label="Interchange_Only",
     direction_col="ic_fw_directions",
     target_id_cols=["x_round", "y_round"],
 )
+_claimed = ep_claimed_coords(gdf_nodes_snapped)
 ```
 
 ### D1 Summary
@@ -996,9 +1009,9 @@ print(f"  gore_sf (fallback):{(surface_mask & _unsnapped & (gdf_nodes_snapped['n
 print(f"  surface:          {(surface_mask & _unsnapped & (gdf_nodes_snapped['node_type'] == 'surface')).sum():,}")
 
 gdf_nodes_snapped = snap_nodes(
-    gdf_nodes_snapped, ep_surface,
+    gdf_nodes_snapped, filter_ep_claimed(ep_surface, _claimed),
     node_mask      = surface_mask,
-    max_distance_m = 100,
+    max_distance_m = 400,   # wider than pass (c) — ramp_sf terminals can be displaced
     label          = "Surface",
     direction_col  = "link_directions",
     target_id_cols = ["x_round", "y_round"],
@@ -1010,7 +1023,8 @@ surf_dists = gdf_nodes_snapped.loc[gdf_nodes_snapped["snap_rule"] == "Surface", 
 print(f"Surface nodes snapped:  {len(surf_dists):,}")
 print(f"  median: {surf_dists.median():.1f}m  |  max: {surf_dists.max():.1f}m")
 print(f"  < 50m:   {(surf_dists < 50).sum():,}  ({(surf_dists < 50).mean()*100:.0f}%)")
-print(f"  50-100m: {((surf_dists >= 50) & (surf_dists <= 100)).sum():,}")
+print(f"  50-200m: {((surf_dists >= 50) & (surf_dists <= 200)).sum():,}")
+print(f"  200-400m:{((surf_dists > 200) & (surf_dists <= 400)).sum():,}")
 ```
 
 ```{python}

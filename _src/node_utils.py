@@ -41,6 +41,14 @@ Public API
 
     snap_transit(gdf_nodes, gdf_stops, node_mask, max_distance_m, ...) -> GeoDataFrame
         Snap transit nodes to nearest GTFS stop (no direction matching).
+
+    ep_claimed_coords(gdf_nodes_snapped) -> frozenset
+        Return set of (x_round, y_round) tuples already claimed across all
+        completed snap passes.
+
+    filter_ep_claimed(gdf_ep, claimed_coords) -> GeoDataFrame
+        Remove endpoint rows already claimed in prior passes so the same
+        physical endpoint cannot be assigned to two nodes across separate passes.
 """
 
 import re
@@ -824,6 +832,50 @@ def snap_transit(
     exceeded = len(flags) - snapped
     print(f"         → {snapped:,} snapped | {exceeded:,} exceeded {max_distance_m}m threshold")
     return result
+
+
+def ep_claimed_coords(gdf_nodes_snapped: gpd.GeoDataFrame) -> frozenset:
+    """
+    Return the set of (x_round, y_round) endpoint coordinates that have already
+    been claimed across all completed snap passes.
+
+    Call this after each snap_nodes() call and pass the result to
+    filter_ep_claimed() before the next pass.  This ensures each physical
+    endpoint is assigned to at most one model node even when the same endpoint
+    row appears in multiple per-pass pools (e.g. a gore endpoint that lives in
+    both ep_gore and ep_surface).
+
+    Requires target_id_cols=["x_round", "y_round"] on all prior snap_nodes()
+    calls so that snapped_x_round / snapped_y_round columns are present.
+    """
+    if "snapped_x_round" not in gdf_nodes_snapped.columns:
+        return frozenset()
+    claimed = gdf_nodes_snapped.loc[
+        gdf_nodes_snapped["snapped"], ["snapped_x_round", "snapped_y_round"]
+    ].dropna()
+    return frozenset(zip(claimed["snapped_x_round"], claimed["snapped_y_round"]))
+
+
+def filter_ep_claimed(
+    gdf_ep: gpd.GeoDataFrame,
+    claimed_coords: frozenset,
+) -> gpd.GeoDataFrame:
+    """
+    Remove endpoint rows whose (x_round, y_round) coordinate is already in
+    claimed_coords.  Endpoints are identified by their rounded coordinate pair
+    (written by snap_nodes when target_id_cols=["x_round","y_round"]), so the
+    lookup is exact for values produced by np.round(x, 2).
+
+    Parameters
+    ----------
+    gdf_ep        : Endpoint pool GeoDataFrame.  Must have x_round, y_round.
+    claimed_coords: Frozenset from ep_claimed_coords().
+    """
+    if not claimed_coords:
+        return gdf_ep
+    keys = list(zip(gdf_ep["x_round"], gdf_ep["y_round"]))
+    keep = [k not in claimed_coords for k in keys]
+    return gdf_ep[keep].copy()
 
 
 # =============================================================================
