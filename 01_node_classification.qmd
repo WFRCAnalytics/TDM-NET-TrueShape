@@ -198,16 +198,26 @@ in the topology cascade (§A3).
 FT_COL = "FT_2027"
 
 # DIRECTION=1 flag: handles both numeric 1 and string "1" encodings
-_dir_is_1 = gdf_links["DIRECTION"].astype(str).str.strip() == "1"
+_oneway = gdf_links["ONEWAY"].astype(str).str.strip() == "1"
 
 # Mutually exclusive link masks (LN_2027 > 0 already filtered at load time)
-FWY_LINK_MASK = gdf_links[FT_COL].isin({12, 13, 14, 15, 22, 23, 24, 25, 26, 32, 33, 34, 35, 36, 40}) | (
-    (gdf_links[FT_COL] == 2) & _dir_is_1
+
+# 1. Freeway includes interstates and expressways/principal arterials that have directional travel
+FWY_LINK_MASK = gdf_links[FT_COL].isin({22, 23, 24, 25, 26, 32, 33, 34, 35, 36, 40}) | (
+    gdf_links[FT_COL].isin({2, 12, 13, 14, 15}) & _oneway
 )
+
+# 2. Ramp and Collector-Distributor Roads share the same mask
 RAMP_LINK_MASK = gdf_links[FT_COL].isin({20, 21, 28, 29, 30, 31, 41, 42})
-SURFACE_LINK_MASK = gdf_links[FT_COL].isin({2, 3, 4, 5, 6, 7}) & ~(
-    (gdf_links[FT_COL] == 2) & _dir_is_1
-)
+
+# 3. Centroid Connectors (FT = 1)
+CC_LINK_MASK = gdf_links[FT_COL] == 1
+
+# 4. HOV and Managed Lanes (FT = 37, 38, 39)
+MANAGED_LINK_MASK = gdf_links[FT_COL].isin({37, 38, 39})
+
+# 5. Remaining Links get assigned as Surface Links
+SURFACE_LINK_MASK = ~(FWY_LINK_MASK | RAMP_LINK_MASK | CC_LINK_MASK | MANAGED_LINK_MASK)
 
 # FW_CODES: FT codes used for the freeway-priority direction cascade.
 # FT=2+DIRECTION=1 is classified as freeway but excluded here because its
@@ -217,7 +227,7 @@ SURFACE_LINK_MASK = gdf_links[FT_COL].isin({2, 3, 4, 5, 6, 7}) & ~(
 FW_CODES = {12, 13, 14, 15, 22, 23, 24, 25, 26, 32, 33, 34, 35, 36, 40}
 
 gdf_nodes["Freeway"] = nodes_on(gdf_nodes, gdf_links[FWY_LINK_MASK])
-gdf_nodes["Ramp"]    = nodes_on(gdf_nodes, gdf_links[RAMP_LINK_MASK])
+gdf_nodes["Ramp"] = nodes_on(gdf_nodes, gdf_links[RAMP_LINK_MASK])
 gdf_nodes["Surface"] = nodes_on(gdf_nodes, gdf_links[SURFACE_LINK_MASK])
 gdf_nodes["FixedTransit"] = (
     nodes_on(gdf_nodes, gdf_links, {70, 80})
