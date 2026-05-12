@@ -433,8 +433,9 @@ print(f"Active centerlines: {len(active_cl):,} of {len(gdf_centerlines):,}")
 
 Three mutually exclusive boolean flags per segment. Primary authority is
 `DOT_FCLASS` for freeway identification; `DOT_RTNAME` (UDOT LRS) supplements with
-explicit route numbers and ramp/CD facility characters. Directional `NAME` tokens
-(NB/SB/EB/WB) elevate divided Principal Arterials into the freeway class.
+explicit route numbers and ramp/CD facility characters. `ONEWAY` in (`1`, `2`)
+elevates divided Principal Arterials into the freeway class (domain CVDomain_OneWay:
+0=Two-way, 1=One-way direction of arc, 2=One-way opposite direction of arc).
 
 ```
 DOT_RTNAME layout (11 characters, zero-padded):
@@ -465,10 +466,6 @@ FREEWAY_ROUTES = {
 }
 
 rtname  = active_cl["DOT_RTNAME"].fillna("")
-# NAME column carries directional tokens (e.g. "I-215 NB") for physically
-# separated roadways. Fall back to FULLNAME if NAME is not present.
-_name_col = "NAME" if "NAME" in active_cl.columns else "FULLNAME"
-name_str  = active_cl[_name_col].fillna("")
 
 # ── Shared exclusion flags ────────────────────────────────────────────────
 # Ramp/CD character check: DOT_RTNAME LIKE '%R%' or '%C%', excluding DupRoute.
@@ -479,16 +476,16 @@ _not_ramp_cd = ~_has_R_or_C | ~_not_duprt  # True when segment is NOT a ramp/CD
 # ── Class 1: Freeway Mainline ─────────────────────────────────────────────
 # Primary: DOT_FCLASS identifies interstate / other freeway geometry.
 # Secondary: explicit UDOT route number is a controlled-access corridor.
-# Tertiary: Principal Arterial with a directional name token (NB/SB/EB/WB)
-#           represents a physically separated directional roadway.
+# Tertiary: Principal Arterial with ONEWAY in ('1','2') represents a
+#           physically separated directional roadway.
+#           ONEWAY domain (CVDomain_OneWay): 0=Two-way, 1=One-way direction
+#           of arc, 2=One-way opposite direction of arc.
 # All three require exclusion of ramp/CD facility chars and DupRoute aliases.
 _is_fclass_fwy = active_cl["DOT_FCLASS"].isin(["Interstate", "Other Freeway"])
 _is_named_fwy  = rtname.str.slice(0, 4).isin(FREEWAY_ROUTES)
-_is_dir_pa = (active_cl["DOT_FCLASS"] == "Principal Arterial") & (
-    name_str.str.contains("NB", na=False)
-    | name_str.str.contains("SB", na=False)
-    | name_str.str.contains("EB", na=False)
-    | name_str.str.contains("WB", na=False)
+_is_dir_pa = (
+    (active_cl["DOT_FCLASS"] == "Principal Arterial")
+    & active_cl["ONEWAY"].isin(["1", "2"])
 )
 
 active_cl["is_freeway"] = (
