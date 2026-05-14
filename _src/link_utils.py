@@ -19,8 +19,8 @@ Stage 2 — Public API
 
     merge_centerlines(gdf_centerlines)
         Merge all centerline geometries into a single combined geometry via
-        unary_union + linemerge. Segments touching at degree-2 vertices are
-        fused into longer LineStrings; intersections are preserved as endpoints.
+        linemerge on the raw segments. Segments touching at degree-2 vertices
+        are fused; intersections and flyover crossings are preserved as-is.
 
     split_at_nodes(cl_merged, snap_points_exact)
         Split the merged centerline geometry at all snapped node positions.
@@ -40,7 +40,7 @@ import numpy as np
 import pandas as pd
 import shapely
 from shapely.geometry import LineString, MultiLineString, Point
-from shapely.ops import linemerge, substring, unary_union
+from shapely.ops import linemerge, substring
 from shapely.strtree import STRtree
 
 # =============================================================================
@@ -140,9 +140,16 @@ def merge_centerlines(gdf_centerlines: gpd.GeoDataFrame) -> MultiLineString | Li
     """
     Merge all centerline geometries into a single combined geometry.
 
-    Applies unary_union to dissolve the collection, then linemerge to fuse
-    consecutive segments connected at degree-2 vertices into longer LineStrings.
-    Real intersections (degree >= 3) remain as endpoints — they are not merged.
+    Passes the raw segment collection directly to linemerge (no unary_union).
+    linemerge only joins lines at pre-existing shared endpoints — it never
+    inserts new vertices at interior crossings. This means:
+    - Flyovers/underpasses that cross geometrically but share no endpoint are
+      left as independent components (no false split points).
+    - Ramps that physically connect to another road at a shared endpoint are
+      still merged through that point regardless of vertical level.
+
+    Real intersections (degree >= 3, where 3+ segments share an endpoint)
+    remain as component boundaries and are not merged.
 
     Parameters
     ----------
@@ -155,9 +162,10 @@ def merge_centerlines(gdf_centerlines: gpd.GeoDataFrame) -> MultiLineString | Li
     MultiLineString or LineString
         Combined geometry. Iterate over .geoms for individual components.
     """
-    union = unary_union(gdf_centerlines.geometry.values)
-    merged = linemerge(union)
-    return merged
+    # Flatten any MultiLineStrings to simple LineStrings before merging;
+    # linemerge requires simple geometries (it accesses .coords on each element).
+    parts = shapely.get_parts(gdf_centerlines.geometry.values)
+    return linemerge(parts.tolist())
 
 
 def split_at_nodes(
