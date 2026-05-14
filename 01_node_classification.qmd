@@ -286,13 +286,31 @@ _stacked_class = pd.concat([
 _class_counts = _stacked_class.groupby("N")["cls"].nunique()
 gdf_nodes["LinkClassCount"] = gdf_nodes["N"].map(_class_counts).fillna(0).astype(int)
 
+# Count distinct FT codes per node.
+# Stricter than LinkClassCount: nodes where FT changes (e.g. FT=32→33) register
+# LinkFTCount=2 even though both belong to the freeway class.  Used in the future
+# link true-shape dissolution step to preserve model link boundaries where posted
+# speed or facility sub-type changes — dissolving those nodes would corrupt TDM impedance.
+_stacked_ft = pd.concat([
+    gdf_links[["A", FT_COL]].rename(columns={"A": "N"}),
+    gdf_links[["B", FT_COL]].rename(columns={"B": "N"}),
+], ignore_index=True)
+_ft_counts = _stacked_ft.groupby("N")[FT_COL].nunique()
+gdf_nodes["LinkFTCount"] = gdf_nodes["N"].map(_ft_counts).fillna(0).astype(int)
+
 # Pseudonode: shape vertex on a single homogeneous path — no physical snap target.
-gdf_nodes["is_pseudo"] = (gdf_nodes["NeighborCount"] == 2) & (gdf_nodes["LinkClassCount"] == 1)
+# Uses LinkFTCount (not LinkClassCount): UGRC/UDOT centerlines are segmented at
+# posted speed limit changes, so a node where FT changes (e.g. FT=32→33) has a
+# real physical endpoint in the centerline data and must be sent to snapping.
+# LinkClassCount would incorrectly skip those nodes (both FT codes map to "freeway"
+# class), causing missed snaps at speed-transition points along freeway mainlines.
+gdf_nodes["is_pseudo"] = (gdf_nodes["NeighborCount"] == 2) & (gdf_nodes["LinkFTCount"] == 1)
 
 print(f"Pseudonodes (NeighborCount==2, single class): {gdf_nodes['is_pseudo'].sum():,}")
 print(f"  of which LinkCount==2: {(gdf_nodes['is_pseudo'] & (gdf_nodes['LinkCount'] == 2)).sum():,}")
 print(f"  of which LinkCount> 2: {(gdf_nodes['is_pseudo'] & (gdf_nodes['LinkCount'] > 2)).sum():,}  ← bidirectional road pseudonodes missed by old filter")
 print(f"Class-transition nodes (NeighborCount==2, multi-class): {((gdf_nodes['NeighborCount'] == 2) & (gdf_nodes['LinkClassCount'] > 1)).sum():,}  ← real junctions, must be snapped")
+print(f"FT-transition nodes now sent to snapping (NeighborCount==2, same class, diff FT): {((gdf_nodes['NeighborCount'] == 2) & (gdf_nodes['LinkClassCount'] == 1) & (gdf_nodes['LinkFTCount'] > 1)).sum():,}")
 ```
 
 ```{python}
