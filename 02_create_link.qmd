@@ -1,0 +1,226 @@
+---
+title: Create True-Shape Links
+subtitle: Splitting physical centerlines at snapped model nodes to produce true-shape link pieces
+description: Physical centerline geometry is dissolved, merged, and split at every snapped WFRC model node to produce the raw building-block pieces for true-shape link conflation.
+author:
+ - name: Pukar Bhandari
+   email: pukar.bhandari@wfrc.utah.gov
+   affiliation:
+     - name: Wasatch Front Regional Council
+       url: "https://wfrc.utah.gov/"
+date: "2026-05-14"
+---
+
+## Setup
+
+### Imports
+
+```{python}
+import sys
+from pathlib import Path
+
+import geopandas as gpd
+import numpy as np
+from shapely.geometry import Point
+
+sys.path.insert(0, str(Path.cwd()))
+from _src.link_utils import merge_centerlines, resolve_snap_coords, split_at_nodes
+```
+
+### Configuration
+
+```{python}
+# ── Filepaths ──────────────────────────────────────────────────────────────
+PATHS = {
+    "in_centerlines":   Path("_data/raw/RCL2TDMnew.gdb.zip"),
+    "in_node_snapped":  Path("_data/processed/nodes_snapped.gpkg"),
+    "out_link_pieces":  Path("_data/processed/link_pieces.gpkg"),
+}
+
+# ── CRS ───────────────────────────────────────────────────────────────────
+CRS_UTM = "EPSG:26912"  # NAD83 UTM Zone 12N — Utah (metric)
+```
+
+---
+
+## Load Data
+
+### Roadway Centerlines
+
+Same source, layer, `where=` filter, and whitespace-stripping as `01_node_classification.qmd`
+to ensure the merged geometry is built from the identical feature set used for snapping.
+
+```{python}
+gdb_path = f"/vsizip/{PATHS['in_centerlines'].as_posix()}"
+
+COUNTY_FIPS = ["49003", "49057", "49011", "49035", "49049"]
+county_filter = "(" + ", ".join(f"'{f}'" for f in COUNTY_FIPS) + ")"
+
+gdf_centerlines = gpd.read_file(
+    gdb_path,
+    layer="RCLWasatchFrontAll",
+    where=(
+        f"(DOT_FCLASS IN ('Interstate', 'Local', 'Major Collector', "
+        f"'Minor Arterial', 'Minor Collector', 'Other Freeway', 'Principal Arterial') "
+        f"OR DOT_RTNAME LIKE '%R%' OR DOT_RTNAME LIKE '%C%') "
+        f"AND CARTOCODE <> '99' "
+        f"AND (COUNTY_L IN {county_filter} OR COUNTY_R IN {county_filter})"
+    ),
+).to_crs(CRS_UTM)
+
+for col in ["DOT_FCLASS", "CARTOCODE", "STATUS", "ONEWAY", "VERT_LEVEL", "POSTTYPE"]:
+    if col in gdf_centerlines.columns:
+        gdf_centerlines[col] = gdf_centerlines[col].str.strip()
+
+print(f"Centerlines: {len(gdf_centerlines):,} features | CRS: {gdf_centerlines.crs}")
+```
+
+### Snapped Nodes
+
+```{python}
+gdf_nodes_snapped = gpd.read_file(PATHS["in_node_snapped"]).to_crs(CRS_UTM)
+
+n_total   = len(gdf_nodes_snapped)
+n_snapped = gdf_nodes_snapped["snapped"].fillna(False).sum()
+print(f"Nodes: {n_total:,} total | {n_snapped:,} snapped ({n_snapped/n_total:.1%})")
+```
+
+```{python}
+#| eval: false
+gdf_nodes_snapped[gdf_nodes_snapped["snapped"]].explore()
+```
+
+---
+
+## Part A — Resolve Snap Coordinates
+
+`nodes_snapped.gpkg` stores `snapped_x_round / snapped_y_round` rounded to 2 decimal
+places (cm precision). Splitting and M-value operations require coordinates that
+exactly match a vertex stored in the centerline geometry. For each snapped node,
+this step finds the nearest unique centerline vertex within 5 cm and records its
+full-precision coordinate.
+
+```{python}
+gdf_nodes_resolved = resolve_snap_coords(
+    gdf_nodes_snapped,
+    gdf_centerlines,
+    tolerance=0.05,
+)
+
+n_resolved   = gdf_nodes_resolved["snap_resolved"].sum()
+n_unresolved = n_snapped - n_resolved
+print(f"Coordinate resolution: {n_resolved:,} resolved | {n_unresolved:,} unresolved")
+```
+
+```{python}
+if n_unresolved > 0:
+    unresolved = gdf_nodes_resolved[
+        gdf_nodes_resolved["snapped"].fillna(False) & ~gdf_nodes_resolved["snap_resolved"]
+    ]
+    print("Unresolved node sample (check snap quality):")
+    print(unresolved[["N", "snap_rule", "snapped_x_round", "snapped_y_round"]].head(10).to_string())
+```
+
+Build the list of exact-coordinate Points used as split locations.
+
+```{python}
+resolved_mask = gdf_nodes_resolved["snap_resolved"]
+snap_points_exact = [
+    Point(row["x_exact"], row["y_exact"])
+    for _, row in gdf_nodes_resolved[resolved_mask].iterrows()
+]
+print(f"Split points prepared: {len(snap_points_exact):,}")
+```
+
+---
+
+## Part B — Merge Centerlines
+
+Dissolve all centerlines into a single geometry via `unary_union`, then fuse
+consecutive segments at degree-2 vertices via `linemerge`. Real intersections
+(3+ roads meeting) remain as line endpoints and are not merged.
+
+```{python}
+print("Merging centerlines … (unary_union + linemerge)")
+cl_merged = merge_centerlines(gdf_centerlines)
+
+if cl_merged.geom_type == "MultiLineString":
+    n_components = len(cl_merged.geoms)
+elif cl_merged.geom_type == "LineString":
+    n_components = 1
+else:
+    n_components = sum(1 for g in cl_merged.geoms if g.geom_type == "LineString")
+
+total_length_km = sum(
+    g.length for g in (cl_merged.geoms if hasattr(cl_merged, "geoms") else [cl_merged])
+) / 1000
+print(f"Merged: {n_components:,} components | total length: {total_length_km:,.1f} km")
+```
+
+---
+
+## Part C — Split at Snapped Nodes
+
+Split the merged geometry at every resolved snap point. Points that project to
+within 0.1 mm of a line's existing endpoint are skipped (already a boundary).
+After all splits, each resulting piece is bounded exclusively by:
+- a snapped model node position, or
+- a physical road intersection preserved by linemerge.
+
+```{python}
+print(f"Splitting {n_components:,} line components at {len(snap_points_exact):,} nodes …")
+pieces = split_at_nodes(cl_merged, snap_points_exact)
+print(f"Pieces after split: {len(pieces):,}")
+```
+
+---
+
+## Part D — Build Pieces Layer and Export
+
+Extract start/end endpoint coordinates for each piece (rounded to 2 dp for
+matching against `snapped_x_round / snapped_y_round` in the next stage), then
+export as `link_pieces.gpkg`.
+
+```{python}
+start_coords = np.array([p.coords[0] for p in pieces])
+end_coords   = np.array([p.coords[-1] for p in pieces])
+
+gdf_pieces = gpd.GeoDataFrame(
+    {
+        "piece_id": np.arange(len(pieces)),
+        "x_start":  np.round(start_coords[:, 0], 2),
+        "y_start":  np.round(start_coords[:, 1], 2),
+        "x_end":    np.round(end_coords[:, 0], 2),
+        "y_end":    np.round(end_coords[:, 1], 2),
+        "length_m": np.array([p.length for p in pieces]),
+        "geometry": pieces,
+    },
+    crs=CRS_UTM,
+)
+
+PATHS["out_link_pieces"].parent.mkdir(parents=True, exist_ok=True)
+gdf_pieces.to_file(PATHS["out_link_pieces"], driver="GPKG")
+print(f"Exported {len(gdf_pieces):,} pieces → {PATHS['out_link_pieces']}")
+```
+
+---
+
+## Summary
+
+```{python}
+lengths = gdf_pieces["length_m"]
+print("Piece length distribution (m):")
+print(f"  Min:    {lengths.min():.1f}")
+print(f"  Median: {lengths.median():.1f}")
+print(f"  P90:    {lengths.quantile(0.90):.1f}")
+print(f"  Max:    {lengths.max():.1f}")
+print()
+print(f"Input:  {len(gdf_centerlines):,} centerline segments")
+print(f"        {n_snapped:,} snapped model nodes ({n_resolved:,} coordinate-resolved)")
+print(f"Output: {len(gdf_pieces):,} pieces in {PATHS['out_link_pieces'].name}")
+```
+
+```{python}
+#| eval: false
+gdf_pieces.explore(column="length_m", cmap="viridis", tooltip=["piece_id", "length_m"])
+```
