@@ -252,7 +252,7 @@ def _split_line_at_points(line: LineString, points: list[Point]) -> list[LineStr
     if total_len < 1e-9:
         return [line]
 
-    _EPS = 1e-4  # 0.1 mm — treat points within this of an endpoint as endpoint
+    _EPS = 0.50  # 50 cm — skip splits within 50 cm of an endpoint; drop sub-segments shorter than 50 cm
 
     # Project each point to an M-value along the line; deduplicate
     m_set: set[float] = set()

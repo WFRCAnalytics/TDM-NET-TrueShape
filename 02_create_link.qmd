@@ -32,9 +32,9 @@ from _src.link_utils import merge_centerlines, resolve_snap_coords, split_at_nod
 ```{python}
 # ── Filepaths ──────────────────────────────────────────────────────────────
 PATHS = {
-    "in_centerlines":   Path("_data/raw/RCL2TDMnew.gdb.zip"),
-    "in_node_snapped":  Path("_data/processed/nodes_snapped.gpkg"),
-    "out_link_pieces":  Path("_data/processed/link_pieces.gpkg"),
+    "in_centerlines":  Path("_data/raw/RCL2TDMnew.gdb.zip"),
+    "in_node_snapped": Path("_data/processed/nodes_snapped.gpkg"),
+    "out_link_pieces": Path("_data/processed/link_pieces.gpkg"),
 }
 
 # ── CRS ───────────────────────────────────────────────────────────────────
@@ -78,11 +78,13 @@ print(f"Centerlines: {len(gdf_centerlines):,} features | CRS: {gdf_centerlines.c
 ### Snapped Nodes
 
 ```{python}
-gdf_nodes_snapped = gpd.read_file(PATHS["in_node_snapped"]).to_crs(CRS_UTM)
+gdf_nodes_snapped = gpd.read_file(PATHS["in_node_snapped"], layer="nodes_snapped").to_crs(CRS_UTM)
+gdf_cc_snapped    = gpd.read_file(PATHS["in_node_snapped"], layer="cc_nodes_snapped").to_crs(CRS_UTM)
 
 n_total   = len(gdf_nodes_snapped)
 n_snapped = gdf_nodes_snapped["snapped"].fillna(False).sum()
 print(f"Nodes: {n_total:,} total | {n_snapped:,} snapped ({n_snapped/n_total:.1%})")
+print(f"CC attachment nodes: {len(gdf_cc_snapped):,}")
 ```
 
 ```{python}
@@ -100,15 +102,23 @@ exactly match a vertex stored in the centerline geometry. For each snapped node,
 this step finds the nearest unique centerline vertex within 5 cm and records its
 full-precision coordinate.
 
+FixedTransit_Rail nodes are excluded — they snap to GTFS rail infrastructure
+(CRT stations, LRT midpoints), not to road centerlines, so they are never road
+centerline split points.
+
 ```{python}
+gdf_nodes_road = gdf_nodes_snapped[
+    gdf_nodes_snapped["snap_rule"] != "FixedTransit_Rail"
+]
 gdf_nodes_resolved = resolve_snap_coords(
-    gdf_nodes_snapped,
+    gdf_nodes_road,
     gdf_centerlines,
     tolerance=0.05,
 )
 
-n_resolved   = gdf_nodes_resolved["snap_resolved"].sum()
-n_unresolved = n_snapped - n_resolved
+n_road_snapped = gdf_nodes_road["snapped"].fillna(False).sum()
+n_resolved     = gdf_nodes_resolved["snap_resolved"].sum()
+n_unresolved   = n_road_snapped - n_resolved
 print(f"Coordinate resolution: {n_resolved:,} resolved | {n_unresolved:,} unresolved")
 ```
 
@@ -136,12 +146,11 @@ print(f"Split points prepared: {len(snap_points_exact):,}")
 
 ## Part B — Merge Centerlines
 
-Dissolve all centerlines into a single geometry via `unary_union`, then fuse
-consecutive segments at degree-2 vertices via `linemerge`. Real intersections
+Fuse consecutive segments at degree-2 vertices via `linemerge`. Real intersections
 (3+ roads meeting) remain as line endpoints and are not merged.
 
 ```{python}
-print("Merging centerlines … (unary_union + linemerge)")
+print("Merging centerlines …")
 cl_merged = merge_centerlines(gdf_centerlines)
 
 if cl_merged.geom_type == "MultiLineString":
@@ -161,15 +170,32 @@ print(f"Merged: {n_components:,} components | total length: {total_length_km:,.1
 
 ## Part C — Split at Snapped Nodes
 
-Split the merged geometry at every resolved snap point. Points that project to
-within 0.1 mm of a line's existing endpoint are skipped (already a boundary).
-After all splits, each resulting piece is bounded exclusively by:
-- a snapped model node position, or
+Split the merged geometry at every model-node snap point and every CC attachment
+snap point. Points that project to within 0.1 mm of a line's existing endpoint
+are skipped (already a boundary). After all splits, each resulting piece is
+bounded exclusively by:
+- a snapped model node position,
+- a snapped CC attachment node position, or
 - a physical road intersection preserved by linemerge.
 
 ```{python}
-print(f"Splitting {n_components:,} line components at {len(snap_points_exact):,} nodes …")
-pieces = split_at_nodes(cl_merged, snap_points_exact)
+cc_resolved = gdf_cc_snapped[gdf_cc_snapped["snap_resolved"]]
+cc_snap_points = [
+    Point(row["x_snap"], row["y_snap"])
+    for _, row in cc_resolved.iterrows()
+]
+all_snap_points = snap_points_exact + cc_snap_points
+n_cc_unresolved = len(gdf_cc_snapped) - len(cc_resolved)
+print(
+    f"Split points: {len(snap_points_exact):,} (model nodes) + "
+    f"{len(cc_snap_points):,} (CC attachment, {n_cc_unresolved:,} unresolved excluded) "
+    f"= {len(all_snap_points):,} total"
+)
+```
+
+```{python}
+print(f"Splitting {n_components:,} line components at {len(all_snap_points):,} points …")
+pieces = split_at_nodes(cl_merged, all_snap_points)
 print(f"Pieces after split: {len(pieces):,}")
 ```
 
@@ -216,8 +242,10 @@ print(f"  P90:    {lengths.quantile(0.90):.1f}")
 print(f"  Max:    {lengths.max():.1f}")
 print()
 print(f"Input:  {len(gdf_centerlines):,} centerline segments")
-print(f"        {n_snapped:,} snapped model nodes ({n_resolved:,} coordinate-resolved)")
-print(f"Output: {len(gdf_pieces):,} pieces in {PATHS['out_link_pieces'].name}")
+print(f"        {n_road_snapped:,} snapped road nodes ({n_resolved:,} coordinate-resolved)")
+print(f"        {len(gdf_cc_snapped):,} CC attachment nodes snapped")
+print(f"Output: {len(gdf_pieces):,} pieces → {PATHS['out_link_pieces'].name}")
+print(f"        {len(gdf_cc_snapped):,} CC attachment nodes → {PATHS['in_node_snapped'].name} (layer: cc_nodes_snapped)")
 ```
 
 ```{python}

@@ -37,6 +37,12 @@ Public API
     snap_transit(gdf_nodes, gdf_stops, node_mask, max_distance_m, ...) -> GeoDataFrame
         Snap transit nodes to nearest GTFS stop (no direction matching).
 
+    snap_cc_nodes(gdf_cc_nodes, gdf_centerlines, max_snap_dist_m=500) -> GeoDataFrame
+        Snap centroid connector attachment nodes to the nearest centerline vertex.
+        Nearest-vertex STRtree lookup; no direction filtering. Nodes beyond
+        max_snap_dist_m receive NaN x_snap/y_snap and snap_resolved=False.
+        Adds x_snap, y_snap, snap_dist_m, snap_resolved columns.
+
     ep_claimed_coords(gdf_nodes_snapped) -> frozenset
         Return set of (x_round, y_round) tuples already claimed across all
         completed snap passes.
@@ -47,6 +53,7 @@ Public API
 """
 
 import re
+import warnings
 from collections import defaultdict, deque
 
 import geopandas as gpd
@@ -813,6 +820,10 @@ def snap_transit(
         if f"snapped_{col}" not in result.columns:
             result[f"snapped_{col}"] = None
 
+    for col in ("snapped_x_round", "snapped_y_round"):
+        if col not in result.columns:
+            result[col] = None
+
     candidate_nodes = result.loc[candidate_idx]
     geoms, dists, flags, attrs = _spatial_snap(
         candidate_nodes,
@@ -829,12 +840,77 @@ def snap_transit(
         result.at[idx, "snap_distance_m"] = dist
         result.at[idx, "snapped"] = snapped_flag
         result.at[idx, "snap_rule"] = label if snapped_flag else "exceeded_threshold"
+        if snapped_flag:
+            coords = shapely.get_coordinates(geom)
+            result.at[idx, "snapped_x_round"] = round(float(coords[0, 0]), 2)
+            result.at[idx, "snapped_y_round"] = round(float(coords[0, 1]), 2)
         for col, values in attrs.items():
             result.at[idx, f"snapped_{col}"] = values[i]
 
     snapped = sum(flags)
     exceeded = len(flags) - snapped
     print(f"         → {snapped:,} snapped | {exceeded:,} exceeded {max_distance_m}m threshold")
+    return result
+
+
+def snap_cc_nodes(
+    gdf_cc_nodes: gpd.GeoDataFrame,
+    gdf_centerlines: gpd.GeoDataFrame,
+    max_snap_dist_m: float = 500.0,
+) -> gpd.GeoDataFrame:
+    """
+    Snap centroid connector attachment nodes to the nearest centerline vertex.
+
+    Unlike the greedy endpoint snapping in snap_nodes(), this performs a simple
+    nearest-vertex lookup with no direction filtering. Nodes whose nearest vertex
+    exceeds max_snap_dist_m receive NaN x_snap/y_snap and snap_resolved=False;
+    they are excluded from downstream split-point lists.
+
+    Parameters
+    ----------
+    gdf_cc_nodes : GeoDataFrame
+        Centroid connector attachment nodes. Must have point geometry and N column.
+        Both GeoDataFrames must be in the same CRS.
+    gdf_centerlines : GeoDataFrame
+        Centerline layer. Used for vertex extraction only.
+    max_snap_dist_m : float
+        Distance cap in metres. Nodes farther than this from any centerline
+        vertex are flagged unresolved (x_snap/y_snap left NaN). Default 500 m.
+
+    Returns
+    -------
+    GeoDataFrame
+        Copy of gdf_cc_nodes with four new columns:
+        - x_snap, y_snap  : float — exact vertex coordinate (NaN if unresolved)
+        - snap_dist_m     : float — distance to nearest vertex
+        - snap_resolved   : bool  — True when within max_snap_dist_m
+    """
+    raw_coords = shapely.get_coordinates(gdf_centerlines.geometry.values)
+    unique_coords = np.unique(np.round(raw_coords, 4), axis=0)
+    vertex_geoms = shapely.points(unique_coords[:, 0], unique_coords[:, 1])
+    tree = STRtree(vertex_geoms)
+
+    node_coords = shapely.get_coordinates(gdf_cc_nodes.geometry.values)
+    query_pts = shapely.points(node_coords[:, 0], node_coords[:, 1])
+
+    nearest_idxs = tree.nearest(query_pts)
+    nearest_verts = vertex_geoms[nearest_idxs]
+    nearest_xy = shapely.get_coordinates(nearest_verts)
+    dists = shapely.distance(query_pts, nearest_verts)
+
+    resolved = dists <= max_snap_dist_m
+    n_unresolved = int((~resolved).sum())
+    if n_unresolved:
+        warnings.warn(
+            f"snap_cc_nodes: {n_unresolved} CC attachment node(s) had no "
+            f"centerline vertex within {max_snap_dist_m} m — x_snap/y_snap left NaN."
+        )
+
+    result = gdf_cc_nodes.copy()
+    result["x_snap"] = np.where(resolved, nearest_xy[:, 0], np.nan)
+    result["y_snap"] = np.where(resolved, nearest_xy[:, 1], np.nan)
+    result["snap_dist_m"] = dists
+    result["snap_resolved"] = resolved
     return result
 
 

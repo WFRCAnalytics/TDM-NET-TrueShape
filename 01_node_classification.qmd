@@ -39,6 +39,7 @@ from _src.node_utils import (
     assign_endpoint_directions,
     snap_nodes,
     snap_transit,
+    snap_cc_nodes,
 )
 ```
 
@@ -1298,6 +1299,42 @@ plt.show()
 ```{python}
 out_path = PATHS["out_node_snapped"]
 out_path.parent.mkdir(parents=True, exist_ok=True)
-gdf_nodes_snapped.to_crs(CRS_UTM).to_file(out_path, driver="GPKG")
+gdf_nodes_snapped.to_crs(CRS_UTM).to_file(out_path, layer="nodes_snapped", driver="GPKG")
 print(f"Snapped nodes saved to: {out_path}")
+```
+
+### CC Attachment Nodes
+
+Centroid connector attachment nodes are the network-side endpoints of FT_2027 = 1
+(centroid connector) links — the taps where zone centroids connect to the road
+network. Zone centroids themselves (N < 3600) are excluded; only the network
+attachment nodes (N ≥ 3600) are retained.
+
+These nodes are snapped to the nearest physical centerline **vertex** (not
+segment endpoint) using a simple STRtree nearest-vertex lookup — no direction
+filtering, no greedy assignment. The result is written as a second layer in
+`nodes_snapped.gpkg` so Stage 2 can use them as additional centerline split points.
+
+```{python}
+gdf_cc_links = gpd.read_file(PATHS["in_network_links"], where="FT_2027 = 1")
+cc_node_ids = set(gdf_cc_links["A"]) | set(gdf_cc_links["B"])
+print(f"Centroid connector links: {len(gdf_cc_links):,} | unique node IDs: {len(cc_node_ids):,}")
+
+gdf_cc_nodes = gdf_nodes[
+    gdf_nodes["N"].isin(cc_node_ids) & (gdf_nodes["N"] >= 3600)
+].copy()
+print(f"CC attachment nodes (N ≥ 3600): {len(gdf_cc_nodes):,}")
+```
+
+```{python}
+gdf_cc_snapped = snap_cc_nodes(gdf_cc_nodes.to_crs(CRS_UTM), gdf_centerlines)
+
+n_resolved   = gdf_cc_snapped["snap_resolved"].sum()
+n_unresolved = len(gdf_cc_snapped) - n_resolved
+dist = gdf_cc_snapped.loc[gdf_cc_snapped["snap_resolved"], "snap_dist_m"]
+print(f"Resolved: {n_resolved:,} | Unresolved (> 500 m): {n_unresolved:,}")
+print(f"Snap distance (m): median={dist.median():.1f} | P90={dist.quantile(0.90):.1f} | max={dist.max():.1f}")
+
+gdf_cc_snapped.to_crs(CRS_UTM).to_file(out_path, layer="cc_nodes_snapped", driver="GPKG")
+print(f"CC attachment nodes saved to: {out_path} (layer: cc_nodes_snapped)")
 ```
