@@ -27,15 +27,29 @@ Stage 2 — Public API
         Uses M-value projection + substring to handle multiple split points per
         line in one pass. Returns a list of LineString pieces.
 
-Stage 3 — Public API (implemented in 03_transfer_attributes.qmd)
------------------------------------------------------------------
-    dissolve_pseudonodes, build_piece_graph, assemble_chain
+Stage 3 — Public API
+--------------------
+    dissolve_pseudonodes(gdf_links, pseudo_node_ids)
+        Collapse chains of model links connected through pseudonodes into single
+        dissolved links spanning from one real node to another.
+        Returns a DataFrame with A, B, FT_2027, LN_2027, DIRECTION, ONEWAY,
+        n_constituents, constituent_ab_pairs.
+
+    build_piece_graph(gdf_pieces, gdf_nodes_snapped)
+        Build a networkx Graph from physical link pieces. Each node is labelled
+        "real_junction", "pseudonode", or "internal" based on snap status.
+
+    assemble_chain(piece_graph, a_coord, b_coord)
+        Constrained BFS from a_coord to b_coord through non-real-junction nodes.
+        Returns an ordered list of LineString pieces forming the path.
 """
 
+import json
 import warnings
-from collections import defaultdict
+from collections import defaultdict, deque
 
 import geopandas as gpd
+import networkx as nx
 import numpy as np
 import pandas as pd
 import shapely
@@ -273,3 +287,289 @@ def _split_line_at_points(line: LineString, points: list[Point]) -> list[LineStr
             segments.append(seg)
 
     return segments if segments else [line]
+
+
+# =============================================================================
+# Stage 3 helpers
+# =============================================================================
+
+
+def dissolve_pseudonodes(
+    gdf_links: gpd.GeoDataFrame,
+    pseudo_node_ids: set,
+) -> pd.DataFrame:
+    """
+    Collapse chains of model links connected through pseudonodes into dissolved links.
+
+    A pseudonode is a degree-2 node lying in the interior of what should be a
+    single logical link (all connected links share the same FT). This function
+    merges consecutive links into a single dissolved link spanning from one real
+    node (is_pseudo=False) to another.
+
+    Parameters
+    ----------
+    gdf_links : GeoDataFrame
+        Filtered model links to dissolve. Must have columns A, B, FT_2027,
+        LN_2027, DIRECTION, ONEWAY.
+    pseudo_node_ids : set
+        Set of node N-values that are pseudonodes (is_pseudo=True).
+
+    Returns
+    -------
+    DataFrame with one row per dissolved link:
+        A, B               : int  — real start/end node N-values
+        FT_2027, LN_2027   : int  — from first constituent link in chain
+        DIRECTION, ONEWAY  : str/int — from first constituent link
+        n_constituents     : int  — number of original links collapsed
+        constituent_ab_pairs : str — JSON list of [A, B] pairs in traversal order
+
+    Notes
+    -----
+    Uses a directed MultiDiGraph so that opposite-direction links (A→P and P→A)
+    on the same road segment produce two separate chains (A→B and B→A) rather
+    than collapsing into a single self-loop.
+    """
+    G: nx.MultiDiGraph = nx.MultiDiGraph()
+    for _, row in gdf_links.iterrows():
+        a, b = int(row["A"]), int(row["B"])
+        G.add_edge(
+            a, b,
+            orig_A=a,
+            orig_B=b,
+            FT_2027=int(row["FT_2027"]),
+            LN_2027=int(row["LN_2027"]),
+            DIRECTION=str(row["DIRECTION"]),
+            ONEWAY=int(row["ONEWAY"]),
+        )
+
+    real_nodes = set(G.nodes()) - pseudo_node_ids
+    dissolved: list[dict] = []
+    visited_edges: set[tuple] = set()
+
+    for start in sorted(real_nodes):
+        # out_edges: only edges leaving `start` (directed)
+        for _, nbr, key, edata in G.out_edges(start, keys=True, data=True):
+            ek = (start, nbr, key)
+            if ek in visited_edges:
+                continue
+            visited_edges.add(ek)
+
+            chain_pairs: list[list[int]] = [[edata["orig_A"], edata["orig_B"]]]
+            first_edata = edata
+            curr = nbr
+
+            while curr in pseudo_node_ids:
+                # Prefer edges not returning to `start`; fall back to any unvisited edge.
+                # This prevents a pseudonode's back-edge to the entry real node from being
+                # chosen when a forward edge to a different real node is also available.
+                next_found = None
+                fallback = None
+                for _, cnbr, ckey, cedata in G.out_edges(curr, keys=True, data=True):
+                    cek = (curr, cnbr, ckey)
+                    if cek in visited_edges:
+                        continue
+                    if cnbr != start:
+                        next_found = (cnbr, cedata, cek)
+                        break
+                    if fallback is None:
+                        fallback = (cnbr, cedata, cek)
+                if next_found is None:
+                    next_found = fallback
+                if next_found is None:
+                    break
+                next_nbr, next_edata, next_ek = next_found
+                visited_edges.add(next_ek)
+                chain_pairs.append([next_edata["orig_A"], next_edata["orig_B"]])
+                curr = next_nbr
+
+            dissolved.append(
+                {
+                    "A": start,
+                    "B": curr,
+                    "FT_2027": first_edata["FT_2027"],
+                    "LN_2027": first_edata["LN_2027"],
+                    "DIRECTION": first_edata["DIRECTION"],
+                    "ONEWAY": first_edata["ONEWAY"],
+                    "n_constituents": len(chain_pairs),
+                    "constituent_ab_pairs": json.dumps(chain_pairs),
+                }
+            )
+
+    return pd.DataFrame(dissolved)
+
+
+def build_piece_graph(
+    gdf_pieces: gpd.GeoDataFrame,
+    gdf_nodes_snapped: gpd.GeoDataFrame,
+) -> nx.Graph:
+    """
+    Build a networkx Graph from physical link pieces for constrained chain traversal.
+
+    Each node in the graph is a (x_round, y_round) coordinate tuple representing
+    a piece endpoint. Nodes are classified by comparing endpoint coordinates to
+    the snapped model node lookup:
+
+    - "real_junction" — snapped AND is_pseudo=False: acts as a chain boundary
+    - "pseudonode"    — snapped AND is_pseudo=True: traversable interior node
+    - "internal"      — not in snapped nodes: physical road intersection
+
+    Parameters
+    ----------
+    gdf_pieces : GeoDataFrame
+        Output of 02_create_link.qmd. Must have x_start, y_start, x_end, y_end,
+        piece_id, length_m, geometry.
+    gdf_nodes_snapped : GeoDataFrame
+        nodes_snapped layer. Must have snapped (bool), snapped_x_round,
+        snapped_y_round, is_pseudo.
+
+    Returns
+    -------
+    networkx.Graph
+        Nodes: (x_round, y_round) tuples with node_type attribute.
+        Edges: one per piece with piece_id, geometry, length_m attributes.
+        When two pieces share the same endpoint pair, the shorter one is kept.
+    """
+    snapped_mask = gdf_nodes_snapped["snapped"].fillna(False).astype(bool)
+    df_snapped = gdf_nodes_snapped[snapped_mask]
+
+    x_arr = df_snapped["snapped_x_round"].to_numpy(dtype=float)
+    y_arr = df_snapped["snapped_y_round"].to_numpy(dtype=float)
+    pseudo_arr = df_snapped["is_pseudo"].fillna(False).astype(bool).to_numpy()
+    coord_to_type: dict[tuple, str] = {
+        (float(x), float(y)): ("pseudonode" if p else "real_junction")
+        for x, y, p in zip(x_arr, y_arr, pseudo_arr)
+    }
+
+    G: nx.Graph = nx.Graph()
+
+    x_start = gdf_pieces["x_start"].to_numpy(dtype=float)
+    y_start = gdf_pieces["y_start"].to_numpy(dtype=float)
+    x_end = gdf_pieces["x_end"].to_numpy(dtype=float)
+    y_end = gdf_pieces["y_end"].to_numpy(dtype=float)
+    pids = gdf_pieces["piece_id"].to_numpy()
+    lens = gdf_pieces["length_m"].to_numpy(dtype=float)
+    geoms = gdf_pieces["geometry"].values
+
+    for i in range(len(gdf_pieces)):
+        cs = (x_start[i], y_start[i])
+        ce = (x_end[i], y_end[i])
+        if cs == ce:
+            continue
+        for c in (cs, ce):
+            if c not in G:
+                G.add_node(c, node_type=coord_to_type.get(c, "internal"))
+        if not G.has_edge(cs, ce):
+            G.add_edge(
+                cs, ce, piece_id=int(pids[i]), geometry=geoms[i], length_m=float(lens[i])
+            )
+        elif float(lens[i]) < G[cs][ce]["length_m"]:
+            G[cs][ce].update(piece_id=int(pids[i]), geometry=geoms[i], length_m=float(lens[i]))
+
+    return G
+
+
+def assemble_chain(
+    piece_graph: nx.Graph,
+    a_coord: tuple,
+    b_coord: tuple,
+) -> list[LineString] | None:
+    """
+    Constrained BFS from a_coord to b_coord through non-real-junction nodes.
+
+    Starting from a_coord (a real junction), the BFS traverses the piece graph
+    but will not pass through any node labelled "real_junction" other than b_coord.
+    This ensures the assembled path stays within the bounds of a single dissolved
+    model link and does not bleed into adjacent links.
+
+    Parameters
+    ----------
+    piece_graph : networkx.Graph
+        Output of build_piece_graph. Nodes carry node_type attribute.
+    a_coord : tuple
+        (x_round, y_round) of start node — must be a real junction in the graph.
+    b_coord : tuple
+        (x_round, y_round) of end node — must be a real junction in the graph.
+
+    Returns
+    -------
+    list[LineString] or None
+        Ordered list of piece geometries forming the path from A to B.
+        Empty list if a_coord == b_coord.
+        None if B is unreachable under the real-junction constraint.
+    """
+    if a_coord not in piece_graph or b_coord not in piece_graph:
+        return None
+    if a_coord == b_coord:
+        return _assemble_loop(piece_graph, a_coord)
+
+    # BFS with parent pointer for memory-efficient path reconstruction
+    parent: dict[tuple, tuple | None] = {a_coord: None}
+    queue: deque[tuple] = deque([a_coord])
+
+    while queue:
+        curr = queue.popleft()
+        for nbr, edata in piece_graph[curr].items():
+            if nbr in parent:
+                continue
+            if nbr == b_coord:
+                parent[nbr] = (curr, edata)
+                geoms: list[LineString] = []
+                node = nbr
+                while parent[node] is not None:
+                    prev_node, edge_data = parent[node]
+                    geoms.append(edge_data["geometry"])
+                    node = prev_node
+                geoms.reverse()
+                return geoms
+            node_type = piece_graph.nodes[nbr].get("node_type", "internal")
+            if node_type == "real_junction":
+                continue
+            parent[nbr] = (curr, edata)
+            queue.append(nbr)
+
+    return None
+
+
+def _assemble_loop(piece_graph: nx.Graph, a_coord: tuple) -> list[LineString] | None:
+    """
+    Find a closed path from a_coord back to itself through non-real-junction nodes.
+
+    Used for dissolved model links where A == B (stub turnarounds). The BFS
+    takes one step away from a_coord, then searches for a path back.
+    """
+    # parent maps node -> (prev_node, edge_data), with a_coord as target (not in parent)
+    parent: dict[tuple, tuple] = {}
+    queue: deque[tuple] = deque()
+
+    for first_nbr, first_edata in piece_graph[a_coord].items():
+        if first_nbr == a_coord:
+            continue  # skip degenerate self-loop edges
+        nt = piece_graph.nodes[first_nbr].get("node_type", "internal")
+        if nt == "real_junction":
+            continue
+        if first_nbr not in parent:
+            parent[first_nbr] = (a_coord, first_edata)
+            queue.append(first_nbr)
+
+    while queue:
+        curr = queue.popleft()
+        for nbr, edata in piece_graph[curr].items():
+            if nbr == a_coord:
+                # Reconstruct closed path
+                geoms: list[LineString] = [edata["geometry"]]
+                node = curr
+                while node != a_coord:
+                    prev_node, edge_data = parent[node]
+                    geoms.append(edge_data["geometry"])
+                    node = prev_node
+                geoms.reverse()
+                return geoms
+            if nbr in parent:
+                continue
+            nt = piece_graph.nodes[nbr].get("node_type", "internal")
+            if nt == "real_junction":
+                continue
+            parent[nbr] = (curr, edata)
+            queue.append(nbr)
+
+    return None

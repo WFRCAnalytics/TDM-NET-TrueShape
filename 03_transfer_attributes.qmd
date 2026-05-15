@@ -1,0 +1,260 @@
+---
+title: Transfer Model Attributes to True-Shape Links
+subtitle: Pseudonode dissolution → piece graph traversal → true-shape geometry assembly
+description: Model links are dissolved across pseudonode chains, then each dissolved link's geometry is assembled by traversing the physical piece graph from A's snap position to B's snap position. Model attributes are transferred to the resulting true-shape LineStrings.
+author:
+ - name: Pukar Bhandari
+   email: pukar.bhandari@wfrc.utah.gov
+   affiliation:
+     - name: Wasatch Front Regional Council
+       url: "https://wfrc.utah.gov/"
+date: "2026-05-15"
+---
+
+## Setup
+
+### Imports
+
+```{python}
+import sys
+from pathlib import Path
+
+import geopandas as gpd
+import numpy as np
+import pandas as pd
+from shapely.geometry import LineString
+from shapely.ops import linemerge
+
+sys.path.insert(0, str(Path.cwd()))
+from _src.link_utils import assemble_chain, build_piece_graph, dissolve_pseudonodes
+```
+
+### Configuration
+
+```{python}
+# ── Filepaths ──────────────────────────────────────────────────────────────
+PATHS = {
+    "in_network_links":    Path("_data/raw/WFv1000_MasterNet/WFv1000_MasterNet_20250821 - Link.shp"),
+    "in_nodes_classified": Path("_data/processed/nodes_classified.gpkg"),
+    "in_node_snapped":     Path("_data/processed/nodes_snapped.gpkg"),
+    "in_link_pieces":      Path("_data/processed/link_pieces.gpkg"),
+    "out_links_trueshape": Path("_data/processed/links_trueshape.gpkg"),
+}
+
+# ── CRS ───────────────────────────────────────────────────────────────────
+CRS_UTM = "EPSG:26912"  # NAD83 UTM Zone 12N — Utah (metric)
+```
+
+---
+
+## Load Data
+
+### Model Links
+
+Centroid connectors (FT=1) and non-physical HOV/Managed-Access links (FT=37,38,39) are
+excluded — only links with physical road geometry and active lanes in 2027 are dissolved.
+
+```{python}
+gdf_links = gpd.read_file(
+    PATHS["in_network_links"],
+    where="LN_2027 > 0 AND FT_2027 NOT IN (1, 37, 38, 39)",
+).to_crs(CRS_UTM)
+
+for col in ("DIRECTION",):
+    if col in gdf_links.columns:
+        gdf_links[col] = gdf_links[col].str.strip()
+
+print(f"Model links (filtered): {len(gdf_links):,} | CRS: {gdf_links.crs}")
+print(f"FT_2027 distribution:\n{gdf_links['FT_2027'].value_counts().sort_index().to_string()}")
+```
+
+### Node Classification
+
+```{python}
+gdf_nodes_classified = gpd.read_file(PATHS["in_nodes_classified"])
+pseudo_node_ids = set(
+    gdf_nodes_classified.loc[gdf_nodes_classified["is_pseudo"].fillna(False), "N"].astype(int)
+)
+real_node_ids = set(
+    gdf_nodes_classified.loc[~gdf_nodes_classified["is_pseudo"].fillna(False), "N"].astype(int)
+)
+print(f"Pseudonodes: {len(pseudo_node_ids):,} | Real nodes: {len(real_node_ids):,}")
+```
+
+### Snapped Nodes
+
+```{python}
+gdf_nodes_snapped = gpd.read_file(PATHS["in_node_snapped"], layer="nodes_snapped").to_crs(CRS_UTM)
+
+snapped_mask = gdf_nodes_snapped["snapped"].fillna(False).astype(bool)
+n_snapped = snapped_mask.sum()
+print(f"Nodes: {len(gdf_nodes_snapped):,} total | {n_snapped:,} snapped ({n_snapped/len(gdf_nodes_snapped):.1%})")
+
+# Snap coordinate lookup: N → (x_round, y_round)
+node_coord_lookup: dict[int, tuple[float, float]] = {
+    int(row["N"]): (float(row["snapped_x_round"]), float(row["snapped_y_round"]))
+    for _, row in gdf_nodes_snapped[snapped_mask].iterrows()
+}
+
+# Model node geometry lookup: N → Point (UTM) — used for unresolved fallback
+node_geom_lookup: dict[int, object] = {
+    int(row["N"]): row["geometry"]
+    for _, row in gdf_nodes_snapped.iterrows()
+}
+
+print(f"Snap coord lookup: {len(node_coord_lookup):,} entries")
+```
+
+### Link Pieces
+
+```{python}
+gdf_pieces = gpd.read_file(PATHS["in_link_pieces"]).to_crs(CRS_UTM)
+print(f"Link pieces: {len(gdf_pieces):,} | CRS: {gdf_pieces.crs}")
+```
+
+---
+
+## Part A — Pseudonode Dissolve
+
+Collapse chains of model links connected through pseudonodes. Each dissolved link
+spans from one real node to another; pseudonodes along the way are absorbed.
+
+Links whose both endpoints are already real nodes appear as single-constituent chains.
+
+```{python}
+print("Dissolving pseudonodes …")
+gdf_dissolved = dissolve_pseudonodes(gdf_links, pseudo_node_ids)
+
+print(f"Original links:   {len(gdf_links):,}")
+print(f"Dissolved links:  {len(gdf_dissolved):,}  ({len(gdf_links)-len(gdf_dissolved):,} fewer)")
+print()
+print("Constituent count distribution:")
+print(gdf_dissolved["n_constituents"].value_counts().sort_index().head(10).to_string())
+print()
+multi = (gdf_dissolved["n_constituents"] > 1).sum()
+print(f"Multi-constituent chains: {multi:,} ({multi/len(gdf_dissolved):.1%})")
+```
+
+---
+
+## Part B — Build Piece Graph
+
+Build a networkx Graph from the physical link pieces. Each node is labelled
+`real_junction`, `pseudonode`, or `internal` based on whether it coincides
+with a snapped model node and whether that node is a pseudonode.
+
+```{python}
+print("Building piece graph …")
+piece_graph = build_piece_graph(gdf_pieces, gdf_nodes_snapped)
+
+n_nodes = piece_graph.number_of_nodes()
+n_edges = piece_graph.number_of_edges()
+type_counts = {}
+for _, attrs in piece_graph.nodes(data=True):
+    t = attrs.get("node_type", "internal")
+    type_counts[t] = type_counts.get(t, 0) + 1
+
+print(f"Piece graph: {n_nodes:,} nodes | {n_edges:,} edges")
+print(f"Node types:")
+for t, cnt in sorted(type_counts.items()):
+    print(f"  {t:20s}: {cnt:,}")
+```
+
+---
+
+## Part C — Assemble True-Shape Chains
+
+For each dissolved link A→B, perform a constrained BFS through the piece graph
+from A's snap coordinate to B's snap coordinate. The BFS cannot traverse through
+`real_junction` nodes other than B — this ensures the path stays within the
+physical bounds of a single dissolved link.
+
+```{python}
+print(f"Assembling {len(gdf_dissolved):,} dissolved links …")
+
+trueshape_geometries: list = []
+trueshape_methods: list[str] = []
+n_unresolved = 0
+n_no_path = 0
+
+for i, (_, row) in enumerate(gdf_dissolved.iterrows()):
+    if i > 0 and i % 2000 == 0:
+        print(f"  {i:,} / {len(gdf_dissolved):,} …")
+
+    a_n, b_n = int(row["A"]), int(row["B"])
+    a_coord = node_coord_lookup.get(a_n)
+    b_coord = node_coord_lookup.get(b_n)
+
+    if a_coord is None or b_coord is None:
+        n_unresolved += 1
+        a_pt = node_geom_lookup.get(a_n)
+        b_pt = node_geom_lookup.get(b_n)
+        fallback = LineString([a_pt, b_pt]) if (a_pt and b_pt) else None
+        trueshape_geometries.append(fallback)
+        trueshape_methods.append("unresolved_no_snap")
+        continue
+
+    pieces = assemble_chain(piece_graph, a_coord, b_coord)
+
+    if pieces is None:
+        n_no_path += 1
+        a_pt = node_geom_lookup.get(a_n)
+        b_pt = node_geom_lookup.get(b_n)
+        fallback = LineString([a_pt, b_pt]) if (a_pt and b_pt) else None
+        trueshape_geometries.append(fallback)
+        trueshape_methods.append("unresolved_no_path")
+    else:
+        merged = linemerge(pieces) if len(pieces) > 1 else (pieces[0] if pieces else None)
+        trueshape_geometries.append(merged)
+        trueshape_methods.append("dissolved")
+
+n_dissolved = trueshape_methods.count("dissolved")
+print(f"\nDissolved (true-shape):  {n_dissolved:,} ({n_dissolved/len(gdf_dissolved):.1%})")
+print(f"Unresolved (no snap):    {n_unresolved:,}")
+print(f"Unresolved (no path):    {n_no_path:,}")
+```
+
+---
+
+## Part D — Build Output and Export
+
+```{python}
+gdf_trueshape = gpd.GeoDataFrame(
+    gdf_dissolved.assign(trueshape_method=trueshape_methods),
+    geometry=trueshape_geometries,
+    crs=CRS_UTM,
+)
+
+PATHS["out_links_trueshape"].parent.mkdir(parents=True, exist_ok=True)
+gdf_trueshape.to_file(PATHS["out_links_trueshape"], driver="GPKG")
+print(f"Exported {len(gdf_trueshape):,} links → {PATHS['out_links_trueshape']}")
+```
+
+---
+
+## Summary
+
+```{python}
+print("=== Stage 3 Summary ===")
+print()
+print(f"Input:  {len(gdf_links):,} model links (FT_2027 not in 1,37,38,39; LN_2027 > 0)")
+print(f"        {len(pseudo_node_ids):,} pseudonodes dissolved")
+print(f"Output: {len(gdf_trueshape):,} dissolved links → {PATHS['out_links_trueshape'].name}")
+print()
+print("Method breakdown:")
+print(gdf_trueshape["trueshape_method"].value_counts().to_string())
+print()
+print("Geometry type breakdown (dissolved only):")
+dissolved_mask = gdf_trueshape["trueshape_method"] == "dissolved"
+print(gdf_trueshape.loc[dissolved_mask, "geometry"].geom_type.value_counts().to_string())
+print()
+print("Constituent count (all links):")
+print(gdf_trueshape["n_constituents"].describe().round(1).to_string())
+```
+
+```{python}
+#| eval: false
+gdf_trueshape[gdf_trueshape["trueshape_method"] == "dissolved"].explore(
+    column="FT_2027", tooltip=["A", "B", "FT_2027", "n_constituents", "trueshape_method"]
+)
+```
